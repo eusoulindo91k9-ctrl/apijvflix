@@ -9,13 +9,16 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-// --- MIDDLEWARE DE SEGURANÇA (CSP) ---
-// Adicionado conforme solicitado para substituir o Sandbox
+// --- MIDDLEWARE DE SEGURANÇA (CORRIGIDO PARA DAR VÍDEO) ---
 app.use((req, res, next) => {
+    // Removemos cabeçalhos antigos que possam conflitar
+    res.removeHeader("X-Frame-Options");
+    
+    // CSP Permissiva para Players de Vídeo
+    // 'frame-src *' permite que o Filemoon/Streamtape carregue dentro do seu site
     res.setHeader(
       "Content-Security-Policy",
-      // Adicionei o dominio do pobreflix no frame-src, senão o vídeo não carrega
-      "default-src 'self'; frame-src 'self' https://www.pobreflixtv.uk; child-src 'self' https://www.pobreflixtv.uk; connect-src 'self'; style-src 'self' 'unsafe-inline'; navigate-to 'self'"
+      "default-src * 'unsafe-inline' 'unsafe-eval' data: blob:; frame-src *; child-src *; connect-src *; script-src * 'unsafe-inline' 'unsafe-eval';"
     );
     next();
 });
@@ -23,12 +26,14 @@ app.use((req, res, next) => {
 // --- CONFIGURAÇÕES ---
 const BASE_URL = 'https://www.pobreflixtv.uk';
 
+// Configuração para imitar um navegador real
 const api = axios.create({
     baseURL: BASE_URL,
     headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Referer': 'https://www.google.com/'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+        'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Referer': 'https://www.pobreflixtv.uk/' // Importante para o axios
     },
     timeout: 15000 
 });
@@ -47,12 +52,10 @@ const parseCard = ($, element) => {
     try {
         const anchor = $(element).find('a');
         let url = anchor.attr('href') || '';
-        
         if (url && !url.startsWith('http')) url = BASE_URL + url;
 
         const thumbContainer = $(element).find('.vb_image_container');
         let thumb = thumbContainer.attr('data-background-src');
-        
         if (!thumb) {
             const style = thumbContainer.attr('style');
             if (style && style.includes('url(')) {
@@ -82,7 +85,7 @@ const parseCard = ($, element) => {
 app.get('/', (req, res) => {
     res.json({
         status: "Online",
-        msg: "API com CSP Headers",
+        msg: "API Vercel - Player Unlocked",
         endpoints: {
             home: "/v1/get/recommeds",
             search: "/v1/search?s=nome",
@@ -144,7 +147,6 @@ app.get('/v1/search', async (req, res) => {
 
 app.get('/v1/info', async (req, res) => {
     let { url, season } = req.query;
-    
     if (!url) return res.status(400).json({ error: "URL obrigatória" });
     if (!url.startsWith('http')) url = BASE_URL + url;
 
@@ -205,13 +207,16 @@ app.get('/v1/info', async (req, res) => {
     }
 });
 
-// --- ROTA DE ASSISTIR (COM IFRAME SEM SANDBOX, CONTROLADO PELO HEADER CSP) ---
+// --- ROTA DE ASSISTIR ---
 app.get('/v1/watch/:id', (req, res) => {
     const { id } = req.params;
     const sv = req.query.sv || 'filemoon'; 
 
     if (!id) return res.send("ID Inválido");
 
+    // Construção da URL de Embed
+    // Alguns servidores do Pobreflix precisam de um token ou ID especial.
+    // O padrão que você enviou é via getplay.php
     const embedUrl = `${BASE_URL}/e/getplay.php?id=${id}&sv=${sv}`;
 
     const html = `
@@ -220,6 +225,8 @@ app.get('/v1/watch/:id', (req, res) => {
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <!-- Esconde o Referer para que o site de vídeo não saiba que vem da sua API -->
+        <meta name="referrer" content="no-referrer" />
         <title>Player</title>
         <style>
             html, body { margin: 0; padding: 0; width: 100%; height: 100%; background: #000; overflow: hidden; }
