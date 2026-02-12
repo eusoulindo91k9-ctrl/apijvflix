@@ -9,6 +9,17 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
+// --- MIDDLEWARE DE SEGURANÇA (CSP) ---
+// Adicionado conforme solicitado para substituir o Sandbox
+app.use((req, res, next) => {
+    res.setHeader(
+      "Content-Security-Policy",
+      // Adicionei o dominio do pobreflix no frame-src, senão o vídeo não carrega
+      "default-src 'self'; frame-src 'self' https://www.pobreflixtv.uk; child-src 'self' https://www.pobreflixtv.uk; connect-src 'self'; style-src 'self' 'unsafe-inline'; navigate-to 'self'"
+    );
+    next();
+});
+
 // --- CONFIGURAÇÕES ---
 const BASE_URL = 'https://www.pobreflixtv.uk';
 
@@ -19,34 +30,29 @@ const api = axios.create({
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
         'Referer': 'https://www.google.com/'
     },
-    timeout: 15000 // Aumentei um pouco para garantir leitura de listas grandes
+    timeout: 15000 
 });
 
 // --- HELPER FUNCTIONS ---
 
-// Extrai ID numérico de URLs (ex: ...-dublado-12345/ -> 12345)
 const extractId = (url) => {
     if (!url) return null;
     const matches = url.match(/-(\d+)\/?$/);
     return matches ? matches[1] : null;
 };
 
-// Limpa texto
 const cleanText = (text) => text ? text.replace(/\n/g, '').trim() : '';
 
-// Parser genérico de Card (Usado na Home e Busca)
 const parseCard = ($, element) => {
     try {
         const anchor = $(element).find('a');
         let url = anchor.attr('href') || '';
         
-        // Corrige URL se for relativa
         if (url && !url.startsWith('http')) url = BASE_URL + url;
 
         const thumbContainer = $(element).find('.vb_image_container');
         let thumb = thumbContainer.attr('data-background-src');
         
-        // Fallback para style background
         if (!thumb) {
             const style = thumbContainer.attr('style');
             if (style && style.includes('url(')) {
@@ -61,7 +67,7 @@ const parseCard = ($, element) => {
         const quality = cleanText($(element).find('.capa-quali').text());
 
         return {
-            id: extractId(url), // ID da página (não do player)
+            id: extractId(url), 
             title,
             url,
             thumb,
@@ -73,20 +79,19 @@ const parseCard = ($, element) => {
 
 // --- ROTAS ---
 
-// 1. Rota de Boas Vindas / Status
 app.get('/', (req, res) => {
     res.json({
         status: "Online",
+        msg: "API com CSP Headers",
         endpoints: {
             home: "/v1/get/recommeds",
-            search: "/v1/search?s=nome_do_filme",
-            info: "/v1/info?url=link_do_pobreflix",
+            search: "/v1/search?s=nome",
+            info: "/v1/info?url=link_completo",
             watch: "/v1/watch/:id"
         }
     });
 });
 
-// 2. Rota de Home (Recomendados)
 app.get('/v1/get/recommeds', async (req, res) => {
     try {
         const response = await api.get('/');
@@ -97,17 +102,14 @@ app.get('/v1/get/recommeds', async (req, res) => {
             series: { releases: [], trending: [] }
         };
 
-        // Container de Filmes (Geralmente o primeiro widget)
         const moviesContainer = $('.cWidgetContainer').eq(0);
         moviesContainer.find('.vbPanel-container[class*="releases_"] #collview').each((i, el) => data.movies.releases.push(parseCard($, el)));
         moviesContainer.find('.vbPanel-container[class*="trending_"] #collview').each((i, el) => data.movies.trending.push(parseCard($, el)));
 
-        // Container de Séries (Geralmente o segundo widget)
         const seriesContainer = $('.cWidgetContainer').eq(1);
         seriesContainer.find('.vbPanel-container[class*="releases_"] #collview').each((i, el) => data.series.releases.push(parseCard($, el)));
         seriesContainer.find('.vbPanel-container[class*="trending_"] #collview').each((i, el) => data.series.trending.push(parseCard($, el)));
 
-        // Remove nulos
         const clean = (arr) => arr.filter(i => i && i.id);
         data.movies.releases = clean(data.movies.releases);
         data.movies.trending = clean(data.movies.trending);
@@ -120,7 +122,6 @@ app.get('/v1/get/recommeds', async (req, res) => {
     }
 });
 
-// 3. Rota de Busca
 app.get('/v1/search', async (req, res) => {
     const query = req.query.s;
     if (!query) return res.status(400).json({ error: "Parâmetro 's' obrigatório" });
@@ -141,8 +142,6 @@ app.get('/v1/search', async (req, res) => {
     }
 });
 
-// 4. Rota de Detalhes (Info + Episódios)
-// URL Exemplo: /v1/info?url=https://www.pobreflixtv.uk/assistir-beast-games-dublado-2024-45343/
 app.get('/v1/info', async (req, res) => {
     let { url, season } = req.query;
     
@@ -150,18 +149,14 @@ app.get('/v1/info', async (req, res) => {
     if (!url.startsWith('http')) url = BASE_URL + url;
 
     try {
-        // Adiciona parametro de temporada se existir
         const fetchUrl = season ? `${url}?temporada=${season}` : url;
-        
         const response = await api.get(fetchUrl);
         const $ = cheerio.load(response.data);
 
-        // --- DETECÇÃO ---
         const listagem = $('#listagem');
         const breadcrumb = $('.breadcrumb').text();
         const isSeries = listagem.length > 0 || breadcrumb.includes('Séries') || breadcrumb.includes('Series');
 
-        // --- DADOS GERAIS ---
         const title = $('.titulo').text().trim();
         const thumb = $('.vb_image_container').attr('data-background-src');
         const desc = $('.sinopse').text().replace('Ler mais...', '').trim();
@@ -169,7 +164,7 @@ app.get('/v1/info', async (req, res) => {
         const imdb = $('.imdb').text().trim();
 
         const result = {
-            id: extractId(url), // ID da página principal
+            id: extractId(url),
             title,
             is_series: isSeries,
             year,
@@ -177,38 +172,28 @@ app.get('/v1/info', async (req, res) => {
             thumb,
             description: desc,
             episodes: [],
-            watch_link: null // Será preenchido se for filme
+            watch_link: null 
         };
 
         if (isSeries) {
-            // --- LÓGICA DE SÉRIE ---
             const episodes = [];
-            
             $('#listagem li').each((index, element) => {
                 const linkTag = $(element).find('a').first();
                 const epUrl = linkTag.attr('href');
-                const epName = linkTag.text().trim(); // "Episódio 01"
-                
-                // O site usa data-id="11" para Temp 1 Ep 1, "12" para Temp 1 Ep 2.
-                // Vamos usar isso para ordenar.
+                const epName = linkTag.text().trim(); 
                 const sortId = parseInt($(element).attr('data-id')) || index;
 
                 if (epUrl) {
                     episodes.push({
                         name: epName,
-                        player_id: extractId(epUrl), // ID importante para o player
+                        player_id: extractId(epUrl),
                         url: epUrl,
                         order: sortId
                     });
                 }
             });
-
-            // Ordena do menor para o maior (Ep 1, Ep 2...)
             result.episodes = episodes.sort((a, b) => a.order - b.order);
         } else {
-            // --- LÓGICA DE FILME ---
-            // Se for filme, o ID para assistir geralmente é o mesmo da URL da página
-            // ou extraído de um botão específico. No Pobreflix, costuma ser o ID da URL.
             result.watch_link = `${req.protocol}://${req.get('host')}/v1/watch/${result.id}`;
         }
 
@@ -220,18 +205,15 @@ app.get('/v1/info', async (req, res) => {
     }
 });
 
-// 5. Rota de Assistir (Retorna Iframe/HTML)
-// Exemplo: /v1/watch/45344
+// --- ROTA DE ASSISTIR (COM IFRAME SEM SANDBOX, CONTROLADO PELO HEADER CSP) ---
 app.get('/v1/watch/:id', (req, res) => {
     const { id } = req.params;
-    // Padrão filemoon, mas permite mudar via query param ?sv=streamtape
     const sv = req.query.sv || 'filemoon'; 
 
     if (!id) return res.send("ID Inválido");
 
     const embedUrl = `${BASE_URL}/e/getplay.php?id=${id}&sv=${sv}`;
 
-    // HTML limpo que ocupa 100% da tela
     const html = `
     <!DOCTYPE html>
     <html lang="pt-BR">
@@ -245,7 +227,12 @@ app.get('/v1/watch/:id', (req, res) => {
         </style>
     </head>
     <body>
-        <iframe src="${embedUrl}" allowfullscreen scrolling="no"></iframe>
+        <iframe 
+            src="${embedUrl}" 
+            allowfullscreen 
+            scrolling="no"
+            allow="autoplay; encrypted-media; fullscreen; picture-in-picture"
+        ></iframe>
     </body>
     </html>
     `;
@@ -253,7 +240,7 @@ app.get('/v1/watch/:id', (req, res) => {
     res.send(html);
 });
 
-// --- EXPORTAÇÃO (IMPORTANTE PARA VERCEL) ---
+// --- EXPORTAÇÃO ---
 if (require.main === module) {
     app.listen(PORT, () => {
         console.log(`Servidor rodando na porta ${PORT}`);
