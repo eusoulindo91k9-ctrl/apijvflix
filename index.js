@@ -217,7 +217,7 @@ app.get('/v1/watch/:id', (req, res) => {
     // Construção da URL de Embed
     // Alguns servidores do Pobreflix precisam de um token ou ID especial.
     // O padrão que você enviou é via getplay.php
-    const embedUrl = `${BASE_URL}/e/getplay.php?id=${id}&sv=${sv}`;
+    const embedUrl = `${BASE_URL}/e/getplay.php?id=${id}&sv=streamtape`;
 
     const html = `
     <!DOCTYPE html>
