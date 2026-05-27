@@ -18,7 +18,7 @@ app.use((req, res, next) => {
     next();
 });
 
-const BASE_URL = 'https://www.pobreflixtv.uk';
+const BASE_URL = 'https://www.pobreflixtv.food';
 
 const api = axios.create({
     baseURL: BASE_URL,
