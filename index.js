@@ -210,6 +210,138 @@ app.get('/v1/info', async (req, res) => {
 // --- ROTA DE ASSISTIR ---
 app.get('/v1/watch/:id', (req, res) => {
     const { id } = req.params;
+    const sv = req.query.sv || 'mixdrop'; // ← padrão alterado para mixdrop
+
+    if (!id) return res.send("ID Inválido");
+
+    // URL de embed com mixdrop como servidor padrão
+    const embedUrl = `${BASE_URL}/e/getplay.php?id=${id}&sv=${sv}`;
+
+    // Referer atualizado para o novo domínio e formato com token
+    const refererUrl = `https://www.pobreflixtv.food/e/getembed.php?sv=mixdrop&id=${id}&token=f3981b7851ab13ac1e33`;
+
+    const html = `
+    <!DOCTYPE html>
+    <html lang="pt-BR">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <!-- Referer atualizado para pobreflixtv.food com token -->
+        <meta name="referrer" content="no-referrer" />
+        <title>Player</title>
+        <style>
+            html, body { margin: 0; padding: 0; width: 100%; height: 100%; background: #000; overflow: hidden; }
+            iframe { width: 100%; height: 100%; border: none; }
+        </style>
+    </head>
+    <body>
+        <iframe 
+            src="${embedUrl}" 
+            allowfullscreen 
+            scrolling="no"
+            allow="autoplay; encrypted-media; fullscreen; picture-in-picture"
+            referrerpolicy="no-referrer"
+            data-referer="${refererUrl}"
+        ></iframe>
+        <script>
+            // Injeta o Referer correto via fetch + blob URL para contornar restrições do iframe
+            (function() {
+                const referer = "${refererUrl}";
+                const embedSrc = "${embedUrl}";
+
+                fetch(embedSrc, {
+                    headers: { 'Referer': referer }
+                })
+                .then(r => r.text())
+                .then(html => {
+                    const blob = new Blob([html], { type: 'text/html' });
+                    const blobUrl = URL.createObjectURL(blob);
+                    document.querySelector('iframe').src = blobUrl;
+                })
+                .catch(() => {
+                    // Fallback: carrega direto se o fetch falhar (CORS etc.)
+                    document.querySelector('iframe').src = embedSrc;
+                });
+            })();
+        </script>
+    </body>
+    </html>
+    `;
+
+    res.send(html);
+});
+
+// --- EXPORTAÇÃO ---
+if (require.main === module) {
+    app.listen(PORT, () => {
+        console.log(`Servidor rodando na porta ${PORT}`);
+    });
+}
+
+module.exports = app;
+    if (!url) return res.status(400).json({ error: "URL obrigatória" });
+    if (!url.startsWith('http')) url = BASE_URL + url;
+
+    try {
+        const fetchUrl = season ? `${url}?temporada=${season}` : url;
+        const response = await api.get(fetchUrl);
+        const $ = cheerio.load(response.data);
+
+        const listagem = $('#listagem');
+        const breadcrumb = $('.breadcrumb').text();
+        const isSeries = listagem.length > 0 || breadcrumb.includes('Séries') || breadcrumb.includes('Series');
+
+        const title = $('.titulo').text().trim();
+        const thumb = $('.vb_image_container').attr('data-background-src');
+        const desc = $('.sinopse').text().replace('Ler mais...', '').trim();
+        const year = $('.infos span').eq(1).text().trim();
+        const imdb = $('.imdb').text().trim();
+
+        const result = {
+            id: extractId(url),
+            title,
+            is_series: isSeries,
+            year,
+            imdb,
+            thumb,
+            description: desc,
+            episodes: [],
+            watch_link: null 
+        };
+
+        if (isSeries) {
+            const episodes = [];
+            $('#listagem li').each((index, element) => {
+                const linkTag = $(element).find('a').first();
+                const epUrl = linkTag.attr('href');
+                const epName = linkTag.text().trim(); 
+                const sortId = parseInt($(element).attr('data-id')) || index;
+
+                if (epUrl) {
+                    episodes.push({
+                        name: epName,
+                        player_id: extractId(epUrl),
+                        url: epUrl,
+                        order: sortId
+                    });
+                }
+            });
+            result.episodes = episodes.sort((a, b) => a.order - b.order);
+        } else {
+            result.watch_link = `${req.protocol}://${req.get('host')}/v1/watch/${result.id}`;
+        }
+
+        res.json(result);
+
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ error: "Erro ao pegar detalhes" });
+    }
+});
+
+// --- ROTA DE ASSISTIR ---
+app.get('/v1/watch/:id', (req, res) => {
+    const { id } = req.params;
     const sv = req.query.sv || 'filemoon'; 
 
     if (!id) return res.send("ID Inválido");
