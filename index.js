@@ -18,7 +18,7 @@ app.use((req, res, next) => {
     next();
 });
 
-const BASE_URL = 'https://www.pobreflixtv.food';
+const BASE_URL = 'https://www.pobreflixtv.autos';
 
 const api = axios.create({
     baseURL: BASE_URL,
@@ -26,7 +26,7 @@ const api = axios.create({
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
         'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
-        'Referer': 'https://www.pobreflixtv.food/'
+        'Referer': 'https://www.pobreflixtv.autos/'
     },
     timeout: 15000
 });
@@ -332,11 +332,9 @@ const mixdropHeaders = {
 
 // Extrai o file ID de uma URL mixdrop  ex: mixdrop.ag/e/abc123 → abc123
 const getMixdropFID = (url) => {
-    const m = url.match(/mixdrop\.[a-z]+\/(?:f|e)\/([a-z0-9]+)/i)
-           || url.match(/mdy48tn97\.com\/(?:f|e)\/([a-z0-9]+)/i)
-           || url.match(/mdbekjwqa\.pw\/(?:f|e)\/([a-z0-9]+)/i)
-           || url.match(/mdfx9dc8n\.net\/(?:f|e)\/([a-z0-9]+)/i)
-           || url.match(/mdzsmutpcvykb\.net\/(?:f|e)\/([a-z0-9]+)/i);
+    if (!url) return null;
+    // Cobre mixdrop.top, mixdrop.ag, e todos os domínios alternativos
+    const m = url.match(/(?:mixdrop\.[a-z]+|mdy48tn97\.com|mdbekjwqa\.pw|mdfx9dc8n\.net|mdzsmutpcvykb\.net)\/(?:f|e)\/([a-z0-9]+)/i);
     return m ? m[1] : null;
 };
 
@@ -352,9 +350,9 @@ const resolveMixdrop = async (fid) => {
     if (fileInfo.deleted) throw new Error('Arquivo deletado no mixdrop');
 
     // 2. Acessa a página do embed para pegar o link direto
-    const embedUrl = `https://mixdrop.ag/e/${fid}`;
+    const embedUrl = `https://mixdrop.top/e/${fid}`;
     const pageResp = await axios.get(embedUrl, {
-        headers: { ...mixdropHeaders, 'Referer': 'https://mixdrop.ag/' },
+        headers: { ...mixdropHeaders, 'Referer': 'https://mixdrop.top/' },
         timeout: 15000
     });
     let html = pageResp.data;
@@ -380,7 +378,7 @@ const resolveMixdrop = async (fid) => {
     if (!directUrl) {
         const continueMatch = html.match(/((?:\/f\/[a-z0-9]+)?\?download)/i);
         if (continueMatch) {
-            const continueResp = await axios.get(`https://mixdrop.ag${continueMatch[1]}`, {
+            const continueResp = await axios.get(`https://mixdrop.top${continueMatch[1]}`, {
                 headers: { ...mixdropHeaders, 'Referer': embedUrl },
                 timeout: 15000
             });
@@ -400,35 +398,67 @@ const resolveMixdrop = async (fid) => {
     return { directUrl, title: fileInfo.title || fid };
 };
 
-// Segue o redirect do getplay.php e retorna a URL final (ex: mixdrop.ag/e/xxx)
+// Extrai URL do mixdrop de qualquer HTML
+const extractMixdropUrl = (html) => {
+    const MD = '(?:mixdrop\\.[a-z]+|mdy48tn97\\.com|mdbekjwqa\\.pw|mdfx9dc8n\\.net|mdzsmutpcvykb\\.net)';
+    const patterns = [
+        new RegExp('<iframe[^>]+src=["\']((?:https?:)?//'+MD+'/(?:e|f)/[a-z0-9]+[^"\']*)', 'i'),
+        new RegExp('(?:window\\.location|location\\.href)\\s*=\\s*["\']((?:https?:)?//'+MD+'/(?:e|f)/[a-z0-9]+[^"\']*)', 'i'),
+        new RegExp('src\\s*[:=]\\s*["\']((?:https?:)?//'+MD+'/(?:e|f)/[a-z0-9]+[^"\']*)', 'i'),
+        new RegExp('["\'](https?://'+MD+'/(?:e|f)/[a-z0-9]+)', 'i'),
+    ];
+    for (const pat of patterns) {
+        const m = html.match(pat);
+        if (m) return m[1].startsWith('//') ? 'https:' + m[1] : m[1];
+    }
+    return null;
+};
+
+// Segue o getplay.php e retorna a URL do mixdrop
 const followGetplay = async (videoId, sv = 'mixdrop') => {
     const getplayUrl = `${BASE_URL}/e/getplay.php?id=${videoId}&sv=${sv}&token=${TOKEN}`;
 
-    // Segue redirects manualmente para capturar a URL final
+    // Não segue redirect — captura o Location do 302 diretamente
     const resp = await axios.get(getplayUrl, {
-        headers: {
-            ...mixdropHeaders,
-            'Referer': `${BASE_URL}/`,
-        },
-        maxRedirects: 10,
+        headers: { ...mixdropHeaders, 'Referer': `${BASE_URL}/` },
+        maxRedirects: 0,
         timeout: 15000,
+        validateStatus: (status) => status < 500,
     });
 
-    // A URL final após redirects
-    const finalUrl = resp.request?.res?.responseUrl || resp.config?.url || getplayUrl;
-
-    // Tenta extrair URL de player do HTML se não redirecionou direto
-    let playerUrl = finalUrl;
-    if (!getMixdropFID(finalUrl)) {
-        // Procura iframe ou window.location no HTML
-        const iframeMatch = resp.data.match(/<iframe[^>]+src=["']([^"']*mixdrop[^"']*)/i);
-        const locationMatch = resp.data.match(/(?:window\.location|location\.href)\s*=\s*["']([^"']*mixdrop[^"']*)/i);
-        const srcMatch = resp.data.match(/["'](https?:\/\/[^"']*mixdrop[^"']*\/(?:e|f)\/[a-z0-9]+[^"']*)/i);
-        playerUrl = iframeMatch?.[1] || locationMatch?.[1] || srcMatch?.[1] || finalUrl;
+    // Caso 1: 302 com Location header (caminho feliz: pobreflixtv → mixdrop.top/e/FID)
+    const location = resp.headers?.location;
+    if (location) {
+        const url = location.startsWith('//') ? 'https:' + location : location;
+        if (getMixdropFID(url)) return url;
+        // Location pode ser relativa ou outro redirect — tenta seguir mais um passo
+        const resp2 = await axios.get(url, {
+            headers: { ...mixdropHeaders, 'Referer': getplayUrl },
+            maxRedirects: 5,
+            timeout: 15000,
+            validateStatus: () => true,
+        });
+        const loc2 = resp2.headers?.location || resp2.request?.res?.responseUrl || '';
+        if (getMixdropFID(loc2)) return loc2;
+        if (typeof resp2.data === 'string') {
+            const fromHtml = extractMixdropUrl(resp2.data);
+            if (fromHtml) return fromHtml;
+        }
     }
 
-    return playerUrl;
+    // Caso 2: respondeu HTML com link do mixdrop
+    if (typeof resp.data === 'string') {
+        const fromHtml = extractMixdropUrl(resp.data);
+        if (fromHtml) return fromHtml;
+    }
+
+    // Caso 3: JSON
+    if (resp.data?.url) return resp.data.url;
+    if (resp.data?.link) return resp.data.link;
+
+    throw new Error(`getplay.php nao retornou URL do mixdrop. Status: ${resp.status}. Resposta: ${String(resp.data).slice(0, 300)}`);
 };
+
 
 // Player HTML com <video> nativo (sem iframe, sem ads)
 const buildVideoPlayer = (mp4Url, title = '') => `<!DOCTYPE html>
