@@ -408,7 +408,7 @@ const followGetplay = async (videoId, sv = 'mixdrop') => {
     const resp = await axios.get(getplayUrl, {
         headers: {
             ...mixdropHeaders,
-            'Referer': `${BASE_URL}/e/getembed.php?sv=${sv}&id=${videoId}&token=${TOKEN}`,
+            'Referer': `${BASE_URL}/`,
         },
         maxRedirects: 10,
         timeout: 15000,
@@ -459,9 +459,9 @@ const buildVideoPlayer = (mp4Url, title = '') => `<!DOCTYPE html>
 </body>
 </html>`;
 
-// Fallback: serve o getembed limpo se o resolver falhar
+// Fallback: serve o getplay.php direto se o resolver falhar
 const fallbackEmbed = (videoId, sv) => {
-    const embedUrl = `${BASE_URL}/e/getembed.php?sv=${sv}&id=${videoId}&token=${TOKEN}`;
+    const getplayUrl = `${BASE_URL}/e/getplay.php?id=${videoId}&sv=${sv}&token=${TOKEN}`;
     return `<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
@@ -474,7 +474,7 @@ const fallbackEmbed = (videoId, sv) => {
     </style>
 </head>
 <body>
-    <iframe src="${embedUrl}" allowfullscreen scrolling="no"
+    <iframe src="${getplayUrl}" allowfullscreen scrolling="no"
         allow="autoplay; encrypted-media; fullscreen; picture-in-picture"
         referrerpolicy="origin"></iframe>
 </body>
