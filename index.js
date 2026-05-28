@@ -33,6 +33,108 @@ const api = axios.create({
 
 const TOKEN = 'f3981b7851ab13ac1e33';
 
+// Domínios de anúncio conhecidos para bloquear
+const AD_DOMAINS = [
+    'doubleclick.net', 'googlesyndication.com', 'googletagmanager.com',
+    'googletagservices.com', 'google-analytics.com', 'adservice.google.com',
+    'pagead2.googlesyndication.com', 'adnxs.com', 'adsrvr.org',
+    'advertising.com', 'outbrain.com', 'taboola.com', 'revcontent.com',
+    'mgid.com', 'propellerads.com', 'popads.net', 'popcash.net',
+    'trafficjunky.com', 'exoclick.com', 'juicyads.com', 'adsterra.com',
+    'hilltopads.net', 'plugrush.com', 'ero-advertising.com',
+    'contentabc.com', 'traffic-media.co', 'clickadu.com', 'adcash.com',
+    'bidvertiser.com', 'yllix.com', 'a-ads.com', 'coinzilla.io',
+    'parodostaunter.qpon', 'am.parodostaunter.qpon',
+    'etv-embed.icu',
+];
+
+// Script injetado no HTML do embed para bloquear ads client-side
+const AD_BLOCKER_SCRIPT = `
+<script>
+(function() {
+    // Bloqueia window.open (popups/popunders)
+    window.open = function() { return null; };
+
+    // Bloqueia criação de elementos de anúncio
+    const AD_DOMAINS = ${JSON.stringify(AD_DOMAINS)};
+    const _createElement = document.createElement.bind(document);
+    document.createElement = function(tag) {
+        const el = _createElement(tag);
+        if (tag.toLowerCase() === 'script' || tag.toLowerCase() === 'iframe') {
+            const _setSrc = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'setAttribute');
+            const origSet = el.setAttribute.bind(el);
+            el.setAttribute = function(name, value) {
+                if ((name === 'src' || name === 'href') && value) {
+                    if (AD_DOMAINS.some(d => value.includes(d))) {
+                        return;
+                    }
+                }
+                return origSet(name, value);
+            };
+        }
+        return el;
+    };
+
+    // Observa o DOM e remove elementos de ad assim que aparecem
+    const observer = new MutationObserver(function(mutations) {
+        mutations.forEach(function(mutation) {
+            mutation.addedNodes.forEach(function(node) {
+                if (!node.src && !node.href && !node.tagName) return;
+                const src = node.src || node.href || '';
+                if (AD_DOMAINS.some(d => src.includes(d))) {
+                    node.remove();
+                }
+                // Remove iframes de popunder
+                if (node.tagName === 'IFRAME' && node.style && 
+                    (node.style.zIndex > 9000 || node.width == 0 || node.height == 0)) {
+                    node.remove();
+                }
+            });
+        });
+    });
+    observer.observe(document.documentElement, { childList: true, subtree: true });
+
+    // Bloqueia navegação forçada por redirect
+    const _pushState = history.pushState.bind(history);
+    window.addEventListener('beforeunload', function(e) {
+        e.stopImmediatePropagation();
+    });
+})();
+</script>
+`;
+
+// Faz fetch server-side do embed, injeta ad blocker e serve HTML limpo
+const fetchAndCleanEmbed = async (embedUrl) => {
+    const response = await axios.get(embedUrl, {
+        headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Referer': BASE_URL + '/',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        },
+        timeout: 15000,
+        responseType: 'text'
+    });
+
+    let html = response.data;
+
+    // Remove scripts de domínios de ad
+    AD_DOMAINS.forEach(domain => {
+        const regex = new RegExp(`<script[^>]*src=["'][^"']*${domain.replace('.', '\\.')}[^"']*["'][^>]*>.*?</script>`, 'gis');
+        html = html.replace(regex, '<!-- ad blocked -->');
+        const iframeRegex = new RegExp(`<iframe[^>]*src=["'][^"']*${domain.replace('.', '\\.')}[^"']*["'][^>]*>.*?</iframe>`, 'gis');
+        html = html.replace(iframeRegex, '<!-- ad blocked -->');
+    });
+
+    // Injeta o script bloqueador logo após o <head>
+    html = html.replace(/<head>/i, '<head>' + AD_BLOCKER_SCRIPT);
+    // Fallback se não tiver <head>
+    if (!html.includes(AD_BLOCKER_SCRIPT)) {
+        html = AD_BLOCKER_SCRIPT + html;
+    }
+
+    return html;
+};
+
 // Extrai o ID da URL do tipo: /assistir-nome-123/ → "123"
 const extractId = (url) => {
     if (!url) return null;
@@ -208,21 +310,25 @@ app.get('/v1/info', async (req, res) => {
 
 // --- ROTA DE ASSISTIR ---
 // O :id aqui deve ser o video_id (extraído do C_Video), não o ID da URL
-app.get('/v1/watch/:id', (req, res) => {
+app.get('/v1/watch/:id', async (req, res) => {
     const { id } = req.params;
     const sv = req.query.sv || 'mixdrop';
 
     if (!id) return res.send("ID Inválido");
 
-    // Embed direto usando o getembed.php com o ID real do C_Video
     const embedUrl = `${BASE_URL}/e/getembed.php?sv=${sv}&id=${id}&token=${TOKEN}`;
 
-    const html = `<!DOCTYPE html>
+    try {
+        const cleanHtml = await fetchAndCleanEmbed(embedUrl);
+        res.setHeader('Content-Type', 'text/html; charset=utf-8');
+        res.send(cleanHtml);
+    } catch (err) {
+        // Fallback: serve iframe direto se o fetch falhar
+        res.send(`<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="referrer" content="origin" />
     <title>Player</title>
     <style>
         html, body { margin: 0; padding: 0; width: 100%; height: 100%; background: #000; overflow: hidden; }
@@ -230,17 +336,12 @@ app.get('/v1/watch/:id', (req, res) => {
     </style>
 </head>
 <body>
-    <iframe
-        src="${embedUrl}"
-        allowfullscreen
-        scrolling="no"
+    <iframe src="${embedUrl}" allowfullscreen scrolling="no"
         allow="autoplay; encrypted-media; fullscreen; picture-in-picture"
-        referrerpolicy="origin"
-    ></iframe>
+        referrerpolicy="origin"></iframe>
 </body>
-</html>`;
-
-    res.send(html);
+</html>`);
+    }
 });
 
 // Rota auxiliar: resolve video_id a partir da URL da página e redireciona pro player
@@ -259,12 +360,16 @@ app.get('/v1/play', async (req, res) => {
 
         const embedUrl = `${BASE_URL}/e/getembed.php?sv=${server}&id=${videoId}&token=${TOKEN}`;
 
-        const html = `<!DOCTYPE html>
+        try {
+            const cleanHtml = await fetchAndCleanEmbed(embedUrl);
+            res.setHeader('Content-Type', 'text/html; charset=utf-8');
+            res.send(cleanHtml);
+        } catch {
+            res.send(`<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="referrer" content="origin" />
     <title>Player</title>
     <style>
         html, body { margin: 0; padding: 0; width: 100%; height: 100%; background: #000; overflow: hidden; }
@@ -272,17 +377,12 @@ app.get('/v1/play', async (req, res) => {
     </style>
 </head>
 <body>
-    <iframe
-        src="${embedUrl}"
-        allowfullscreen
-        scrolling="no"
+    <iframe src="${embedUrl}" allowfullscreen scrolling="no"
         allow="autoplay; encrypted-media; fullscreen; picture-in-picture"
-        referrerpolicy="origin"
-    ></iframe>
+        referrerpolicy="origin"></iframe>
 </body>
-</html>`;
-
-        res.send(html);
+</html>`);
+        }
     } catch (error) {
         console.error(error);
         res.status(500).json({ error: "Erro ao resolver video_id" });
