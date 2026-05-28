@@ -320,11 +320,18 @@ const mixdropHeaders = {
     'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8',
 };
 
-// Extrai o file ID de uma URL mixdrop  ex: mixdrop.ag/e/abc123 → abc123
+// Extrai o file ID de uma URL mixdrop — cobre mixdrop.top, miixdrop.net e variantes
 const getMixdropFID = (url) => {
     if (!url) return null;
-    const m = url.match(/(?:mixdrop\.[a-z]+|mdy48tn97\.com|mdbekjwqa\.pw|mdfx9dc8n\.net|mdzsmutpcvykb\.net)\/(?:f|e)\/([a-z0-9]+)/i);
+    const m = url.match(/(?:mi+xdrop\.[a-z]+|mdy48tn97\.com|mdbekjwqa\.pw|mdfx9dc8n\.net|mdzsmutpcvykb\.net)\/(?:f|e)\/([a-z0-9]+)/i);
     return m ? m[1] : null;
+};
+
+// Detecta o domínio exato do mixdrop na URL para usar como base do embed e referer
+const getMixdropDomain = (url) => {
+    if (!url) return 'mixdrop.top';
+    const m = url.match(/https?:\/\/(mi+xdrop\.[a-z]+|mdy48tn97\.com|mdbekjwqa\.pw|mdfx9dc8n\.net|mdzsmutpcvykb\.net)/i);
+    return m ? m[1] : 'mixdrop.top';
 };
 
 // Unpacker do JS obfuscado no padrão eval(function(p,a,c,k,e,d){...})
@@ -362,12 +369,14 @@ const parseCookies = (setCookieHeaders) => {
 
 // Resolve o MP4 direto a partir de um file ID mixdrop
 // Estratégia: sessão real com cookie, unpack do JS obfuscado
-const resolveMixdrop = async (fid) => {
-    const embedUrl = `https://mixdrop.top/e/${fid}`;
+// domain: domínio real detectado pelo followGetplay (ex: miixdrop.net)
+const resolveMixdrop = async (fid, domain = 'mixdrop.top') => {
+    const baseUrl = `https://${domain}`;
+    const embedUrl = `${baseUrl}/e/${fid}`;
 
     // 1. Primeira requisição — pega os cookies de sessão (como o Python faz com requests.Session)
     const firstResp = await axios.get(embedUrl, {
-        headers: { ...mixdropHeaders, 'Referer': 'https://mixdrop.top/' },
+        headers: { ...mixdropHeaders, 'Referer': baseUrl + '/' },
         timeout: 20000,
         maxRedirects: 5,
         validateStatus: () => true,
@@ -380,7 +389,7 @@ const resolveMixdrop = async (fid) => {
     // 2. Segunda requisição com o cookie setado (replica o comportamento do session.get() do Python)
     const headersWithCookie = {
         ...mixdropHeaders,
-        'Referer': 'https://mixdrop.top/',
+        'Referer': baseUrl + '/',
         ...(rawCookies ? { 'Cookie': rawCookies } : {}),
     };
 
@@ -629,26 +638,38 @@ app.get('/v1/watch/:id', async (req, res) => {
 
     try {
         // 1. Segue getplay.php → pega URL do mixdrop
+        console.log(`[watch] id=${id} sv=${sv}`);
         const playerUrl = await followGetplay(id, sv);
+        console.log(`[watch] playerUrl=${playerUrl}`);
+
         const fid = getMixdropFID(playerUrl);
+        const domain = getMixdropDomain(playerUrl);
+        console.log(`[watch] fid=${fid} domain=${domain}`);
 
         if (!fid) throw new Error('FID não encontrado: ' + playerUrl);
 
         // 2. Resolve MP4 direto via unpack JS + cookie de sessão
-        const { directUrl, title, cookies } = await resolveMixdrop(fid);
+        const { directUrl, title, cookies } = await resolveMixdrop(fid, domain);
+        console.log(`[watch] directUrl=${directUrl}`);
 
         // 3. Monta URL do proxy com cookie e referer embutidos
         const host = `${req.protocol}://${req.get('host')}`;
-        const proxyUrl = `${host}/v1/proxy?url=${encodeURIComponent(directUrl)}&referer=${encodeURIComponent('https://mixdrop.top/')}&cookies=${encodeURIComponent(cookies || '')}`;
+        const referer = `https://${domain}/`;
+        const proxyUrl = `${host}/v1/proxy?url=${encodeURIComponent(directUrl)}&referer=${encodeURIComponent(referer)}&cookies=${encodeURIComponent(cookies || '')}`;
 
         // 4. Serve player nativo sem ads, usando o proxy
         res.setHeader('Content-Type', 'text/html; charset=utf-8');
         res.send(buildVideoPlayer(directUrl, title, proxyUrl));
 
     } catch (err) {
-        console.error('[watch] Erro ao resolver, usando fallback:', err.message);
+        console.error('[watch] ERRO:', err.message);
         res.setHeader('Content-Type', 'text/html; charset=utf-8');
-        res.send(fallbackEmbed(id, sv));
+        // Mostra o erro na tela em vez de cair no fallback silencioso
+        res.send(`<!DOCTYPE html><html><body style="background:#000;color:#fff;font-family:sans-serif;padding:20px">
+            <h3>Erro ao resolver vídeo</h3>
+            <pre>${err.message}</pre>
+            <p style="color:#aaa;font-size:12px">ID: ${id} | SV: ${sv}</p>
+        </body></html>`);
     }
 });
 
@@ -673,11 +694,13 @@ app.get('/v1/play', async (req, res) => {
         if (!fid) throw new Error('FID não encontrado: ' + playerUrl);
 
         // 3. Resolve MP4 direto com cookie de sessão
-        const { directUrl, title, cookies } = await resolveMixdrop(fid);
+        const domain2 = getMixdropDomain(playerUrl);
+        const { directUrl, title, cookies } = await resolveMixdrop(fid, domain2);
 
         // 4. Monta URL do proxy
         const host = `${req.protocol}://${req.get('host')}`;
-        const proxyUrl = `${host}/v1/proxy?url=${encodeURIComponent(directUrl)}&referer=${encodeURIComponent('https://mixdrop.top/')}&cookies=${encodeURIComponent(cookies || '')}`;
+        const referer2 = `https://${domain2}/`;
+        const proxyUrl = `${host}/v1/proxy?url=${encodeURIComponent(directUrl)}&referer=${encodeURIComponent(referer2)}&cookies=${encodeURIComponent(cookies || '')}`;
 
         // 5. Serve player nativo
         res.setHeader('Content-Type', 'text/html; charset=utf-8');
