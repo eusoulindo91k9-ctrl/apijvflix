@@ -308,23 +308,161 @@ app.get('/v1/info', async (req, res) => {
     }
 });
 
-// --- ROTA DE ASSISTIR ---
-// O :id aqui deve ser o video_id (extraído do C_Video), não o ID da URL
-app.get('/v1/watch/:id', async (req, res) => {
-    const { id } = req.params;
-    const sv = req.query.sv || 'mixdrop';
+// -------------------------------------------------------
+// MIXDROP RESOLVER (baseado no plugin JDownloader)
+// Recebe URL do tipo mixdrop.ag/e/FILEID ou /f/FILEID
+// Retorna o link direto do .mp4
+// -------------------------------------------------------
+const MIXDROP_API = 'https://api.mixdrop.ag';
+const MIXDROP_API_MAIL = 'psp@jdownloader.org';
+const MIXDROP_API_KEY  = 'u3aH2kgUYOQ36hd';
 
-    if (!id) return res.send("ID Inválido");
+// Domínios ativos do mixdrop (mortos ignorados automaticamente)
+const MIXDROP_DOMAINS = [
+    'mixdrop.ag', 'mixdrop.club', 'mdy48tn97.com', 'mdbekjwqa.pw',
+    'mdfx9dc8n.net', 'mdzsmutpcvykb.net', 'mixdrop.ms',
+    'mixdrop.is', 'mixdrop.si', 'mixdrop.ps'
+];
 
-    const embedUrl = `${BASE_URL}/e/getembed.php?sv=${sv}&id=${id}&token=${TOKEN}`;
+const mixdropHeaders = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8',
+};
 
-    try {
-        const cleanHtml = await fetchAndCleanEmbed(embedUrl);
-        res.setHeader('Content-Type', 'text/html; charset=utf-8');
-        res.send(cleanHtml);
-    } catch (err) {
-        // Fallback: serve iframe direto se o fetch falhar
-        res.send(`<!DOCTYPE html>
+// Extrai o file ID de uma URL mixdrop  ex: mixdrop.ag/e/abc123 → abc123
+const getMixdropFID = (url) => {
+    const m = url.match(/mixdrop\.[a-z]+\/(?:f|e)\/([a-z0-9]+)/i)
+           || url.match(/mdy48tn97\.com\/(?:f|e)\/([a-z0-9]+)/i)
+           || url.match(/mdbekjwqa\.pw\/(?:f|e)\/([a-z0-9]+)/i)
+           || url.match(/mdfx9dc8n\.net\/(?:f|e)\/([a-z0-9]+)/i)
+           || url.match(/mdzsmutpcvykb\.net\/(?:f|e)\/([a-z0-9]+)/i);
+    return m ? m[1] : null;
+};
+
+// Resolve o MP4 direto a partir de um file ID mixdrop
+const resolveMixdrop = async (fid) => {
+    // 1. Verifica se existe via API
+    const apiUrl = `${MIXDROP_API}/fileinfo?email=${encodeURIComponent(MIXDROP_API_MAIL)}&key=${MIXDROP_API_KEY}&ref[]=${fid}`;
+    const apiResp = await axios.get(apiUrl, { headers: mixdropHeaders, timeout: 15000 });
+    const json = apiResp.data;
+
+    if (!json.success) throw new Error('Arquivo não encontrado no mixdrop');
+    const fileInfo = json.result[0];
+    if (fileInfo.deleted) throw new Error('Arquivo deletado no mixdrop');
+
+    // 2. Acessa a página do embed para pegar o link direto
+    const embedUrl = `https://mixdrop.ag/e/${fid}`;
+    const pageResp = await axios.get(embedUrl, {
+        headers: { ...mixdropHeaders, 'Referer': 'https://mixdrop.ag/' },
+        timeout: 15000
+    });
+    let html = pageResp.data;
+
+    // 3. Tenta extrair o link direto do JS da página (padrão do mixdrop)
+    // Padrão: MDCore.wurl="https://...mp4"  ou  "videoUrl":"https://...mp4"
+    let directUrl = null;
+
+    const patterns = [
+        /MDCore\.wurl\s*=\s*["']([^"']+\.mp4[^"']*)/i,
+        /"videoUrl"\s*:\s*["']([^"']+\.mp4[^"']*)/i,
+        /source\s+src=["']([^"']+\.mp4[^"']*)/i,
+        /file\s*:\s*["']([^"']+\.mp4[^"']*)/i,
+        /["'](https?:\/\/[^"']*\.mp4[^"']*)/i,
+    ];
+
+    for (const pat of patterns) {
+        const m = html.match(pat);
+        if (m) { directUrl = m[1]; break; }
+    }
+
+    // 4. Se tem ?download na página (passo extra que o JD menciona)
+    if (!directUrl) {
+        const continueMatch = html.match(/((?:\/f\/[a-z0-9]+)?\?download)/i);
+        if (continueMatch) {
+            const continueResp = await axios.get(`https://mixdrop.ag${continueMatch[1]}`, {
+                headers: { ...mixdropHeaders, 'Referer': embedUrl },
+                timeout: 15000
+            });
+            html = continueResp.data;
+            for (const pat of patterns) {
+                const m = html.match(pat);
+                if (m) { directUrl = m[1]; break; }
+            }
+        }
+    }
+
+    if (!directUrl) throw new Error('Não foi possível extrair o link direto do mixdrop');
+
+    // Garante https
+    if (directUrl.startsWith('//')) directUrl = 'https:' + directUrl;
+
+    return { directUrl, title: fileInfo.title || fid };
+};
+
+// Segue o redirect do getplay.php e retorna a URL final (ex: mixdrop.ag/e/xxx)
+const followGetplay = async (videoId, sv = 'mixdrop') => {
+    const getplayUrl = `${BASE_URL}/e/getplay.php?id=${videoId}&sv=${sv}&token=${TOKEN}`;
+
+    // Segue redirects manualmente para capturar a URL final
+    const resp = await axios.get(getplayUrl, {
+        headers: {
+            ...mixdropHeaders,
+            'Referer': `${BASE_URL}/e/getembed.php?sv=${sv}&id=${videoId}&token=${TOKEN}`,
+        },
+        maxRedirects: 10,
+        timeout: 15000,
+    });
+
+    // A URL final após redirects
+    const finalUrl = resp.request?.res?.responseUrl || resp.config?.url || getplayUrl;
+
+    // Tenta extrair URL de player do HTML se não redirecionou direto
+    let playerUrl = finalUrl;
+    if (!getMixdropFID(finalUrl)) {
+        // Procura iframe ou window.location no HTML
+        const iframeMatch = resp.data.match(/<iframe[^>]+src=["']([^"']*mixdrop[^"']*)/i);
+        const locationMatch = resp.data.match(/(?:window\.location|location\.href)\s*=\s*["']([^"']*mixdrop[^"']*)/i);
+        const srcMatch = resp.data.match(/["'](https?:\/\/[^"']*mixdrop[^"']*\/(?:e|f)\/[a-z0-9]+[^"']*)/i);
+        playerUrl = iframeMatch?.[1] || locationMatch?.[1] || srcMatch?.[1] || finalUrl;
+    }
+
+    return playerUrl;
+};
+
+// Player HTML com <video> nativo (sem iframe, sem ads)
+const buildVideoPlayer = (mp4Url, title = '') => `<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>${title || 'Player'}</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body { width: 100%; height: 100%; background: #000; overflow: hidden; }
+        video {
+            width: 100%; height: 100%;
+            display: block;
+            background: #000;
+        }
+    </style>
+</head>
+<body>
+    <video
+        src="${mp4Url}"
+        controls
+        autoplay
+        playsinline
+        preload="metadata"
+        crossorigin="anonymous"
+    ></video>
+</body>
+</html>`;
+
+// Fallback: serve o getembed limpo se o resolver falhar
+const fallbackEmbed = (videoId, sv) => {
+    const embedUrl = `${BASE_URL}/e/getembed.php?sv=${sv}&id=${videoId}&token=${TOKEN}`;
+    return `<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
     <meta charset="UTF-8">
@@ -340,11 +478,38 @@ app.get('/v1/watch/:id', async (req, res) => {
         allow="autoplay; encrypted-media; fullscreen; picture-in-picture"
         referrerpolicy="origin"></iframe>
 </body>
-</html>`);
+</html>`;
+};
+
+// --- ROTA DE ASSISTIR ---
+app.get('/v1/watch/:id', async (req, res) => {
+    const { id } = req.params;
+    const sv = req.query.sv || 'mixdrop';
+
+    if (!id) return res.send("ID Inválido");
+
+    try {
+        // 1. Segue getplay.php → pega URL do mixdrop
+        const playerUrl = await followGetplay(id, sv);
+        const fid = getMixdropFID(playerUrl);
+
+        if (!fid) throw new Error('FID não encontrado: ' + playerUrl);
+
+        // 2. Resolve MP4 direto via lógica JDownloader
+        const { directUrl, title } = await resolveMixdrop(fid);
+
+        // 3. Serve player nativo sem ads
+        res.setHeader('Content-Type', 'text/html; charset=utf-8');
+        res.send(buildVideoPlayer(directUrl, title));
+
+    } catch (err) {
+        console.error('[watch] Erro ao resolver, usando fallback:', err.message);
+        res.setHeader('Content-Type', 'text/html; charset=utf-8');
+        res.send(fallbackEmbed(id, sv));
     }
 });
 
-// Rota auxiliar: resolve video_id a partir da URL da página e redireciona pro player
+// Rota auxiliar: resolve video_id a partir da URL da página e abre o player
 app.get('/v1/play', async (req, res) => {
     let { url, sv } = req.query;
     if (!url) return res.status(400).json({ error: "URL obrigatória" });
@@ -353,39 +518,27 @@ app.get('/v1/play', async (req, res) => {
     const server = sv || 'mixdrop';
 
     try {
+        // 1. Busca a página e extrai o video_id do C_Video(...)
         const response = await api.get(url);
         const videoId = extractVideoId(response.data);
-
         if (!videoId) return res.status(404).json({ error: "video_id não encontrado na página" });
 
-        const embedUrl = `${BASE_URL}/e/getembed.php?sv=${server}&id=${videoId}&token=${TOKEN}`;
+        // 2. Segue getplay.php → pega URL do mixdrop
+        const playerUrl = await followGetplay(videoId, server);
+        const fid = getMixdropFID(playerUrl);
 
-        try {
-            const cleanHtml = await fetchAndCleanEmbed(embedUrl);
-            res.setHeader('Content-Type', 'text/html; charset=utf-8');
-            res.send(cleanHtml);
-        } catch {
-            res.send(`<!DOCTYPE html>
-<html lang="pt-BR">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Player</title>
-    <style>
-        html, body { margin: 0; padding: 0; width: 100%; height: 100%; background: #000; overflow: hidden; }
-        iframe { width: 100%; height: 100%; border: none; display: block; }
-    </style>
-</head>
-<body>
-    <iframe src="${embedUrl}" allowfullscreen scrolling="no"
-        allow="autoplay; encrypted-media; fullscreen; picture-in-picture"
-        referrerpolicy="origin"></iframe>
-</body>
-</html>`);
-        }
-    } catch (error) {
-        console.error(error);
-        res.status(500).json({ error: "Erro ao resolver video_id" });
+        if (!fid) throw new Error('FID não encontrado: ' + playerUrl);
+
+        // 3. Resolve MP4 direto
+        const { directUrl, title } = await resolveMixdrop(fid);
+
+        // 4. Serve player nativo
+        res.setHeader('Content-Type', 'text/html; charset=utf-8');
+        res.send(buildVideoPlayer(directUrl, title));
+
+    } catch (err) {
+        console.error('[play] Erro ao resolver:', err.message);
+        res.status(500).json({ error: "Erro ao resolver link do vídeo", detail: err.message });
     }
 });
 
