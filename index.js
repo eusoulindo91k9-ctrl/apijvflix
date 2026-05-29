@@ -24,10 +24,9 @@ const TOKEN = '0d3aea9faaa5feda8141';
 const api = axios.create({
     baseURL: BASE_URL,
     headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
-        'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
-        'Referer': 'https://www.pobreflixtv.autos/'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Referer': 'https://www.google.com/'
     },
     timeout: 15000
 });
@@ -423,7 +422,7 @@ app.get('/v1/watch/:id', async (req, res) => {
         videoSessions.set(sessionId, { mp4Url: directUrl, cookies, referer });
 
         const streamUrl = `/api/stream/${sessionId}`;
-        const host = `https://${req.get('host')}`;
+        const host = `https://apijvflix.vercel.app`;
 
         // Retorna JSON com as informações ou redireciona pro stream
         return res.json({
@@ -461,7 +460,7 @@ app.get('/v1/play', async (req, res) => {
         const sessionId = Math.random().toString(36).substring(2, 15);
         videoSessions.set(sessionId, { mp4Url: directUrl, cookies, referer });
 
-        const host = `https://${req.get('host')}`;
+        const host = `${req.protocol}://${req.get('host')}`;
         return res.json({
             title,
             fid,
@@ -522,3 +521,4 @@ if (require.main === module) {
 }
 
 module.exports = app;
+
