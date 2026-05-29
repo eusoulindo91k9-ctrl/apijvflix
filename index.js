@@ -24,9 +24,10 @@ const TOKEN = '0d3aea9faaa5feda8141';
 const api = axios.create({
     baseURL: BASE_URL,
     headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Referer': 'https://www.google.com/'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+        'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Referer': 'https://www.pobreflixtv.autos/'
     },
     timeout: 15000
 });
@@ -51,13 +52,8 @@ const extractId = (url) => {
 const cleanText = (text) => text ? text.replace(/\n/g, '').trim() : '';
 
 const extractVideoId = (html) => {
-    const match = html.match(/C_Video\(['"](\d+)['"]\s*,\s*['"]([^'"]+)['"]\s*,\s*['"]?([^'")]*?)['"]?\)/);
-    if (!match) return null;
-    return {
-        id: match[1],
-        sv: match[2],
-        extra: match[3] || null
-    };
+    const match = html.match(/C_Video\(['"](\d+)['"]\s*,/);
+    return match ? match[1] : null;
 };
 
 const parseCard = ($, element) => {
@@ -111,7 +107,7 @@ const extractMixdropUrl = (html) => {
 // --- GETPLAY: segue getplay.php e retorna URL do mixdrop ---
 
 const followGetplay = async (videoId, sv = 'mixdrop') => {
-    const getplayUrl = `${BASE_URL}/e/getplay.php?id=${videoId}&sv=${sv}&token=${TOKEN}`;
+    const getplayUrl = `${BASE_URL}/e/getembed.php?id=${videoId}&sv=${sv}&token=${TOKEN}`;
 
     const resp = await axios.get(getplayUrl, {
         headers: { ...mixdropHeaders, 'Referer': `${BASE_URL}/` },
@@ -344,7 +340,8 @@ app.get('/v1/info', async (req, res) => {
     if (!url.startsWith('http')) url = BASE_URL + url;
 
     try {
-        const fetchUrl = season ? `${url}?temporada=${season}` : url;
+        let fetchUrl = url.includes('?') ? `${url}&area=online` : `${url}?area=online`;
+        if (season) fetchUrl += `&temporada=${season}`;
         const response = await api.get(fetchUrl);
         const $ = cheerio.load(response.data);
 
@@ -358,15 +355,12 @@ app.get('/v1/info', async (req, res) => {
         const year = $('.infos span').eq(1).text().trim();
         const imdb = $('.imdb').text().trim();
 
-        const videoInfo = extractVideoId(response.data);
-        const videoId = videoInfo?.id || null;
-        const defaultSv = videoInfo?.sv || 'mixdrop';
+        const videoId = extractVideoId(response.data);
         const pageId = extractId(url);
 
         const result = {
             id: pageId,
             video_id: videoId,
-            default_sv: defaultSv,
             title,
             is_series: isSeries,
             year,
@@ -455,13 +449,12 @@ app.get('/v1/play', async (req, res) => {
     const server = sv || 'mixdrop';
 
     try {
-        const response = await api.get(url);
-        const videoInfo = extractVideoId(response.data);
-        if (!videoInfo) return res.status(404).json({ error: "video_id não encontrado na página" });
+        const fetchUrl = url.includes('?') ? `${url}&area=online` : `${url}?area=online`;
+        const response = await api.get(fetchUrl);
+        const videoId = extractVideoId(response.data);
+        if (!videoId) return res.status(404).json({ error: "video_id não encontrado na página" });
 
-        const videoId = videoInfo.id;
-        const serverName = sv || videoInfo.sv || server;
-        const playerUrl = await followGetplay(videoId, serverName);
+        const playerUrl = await followGetplay(videoId, server);
         const fid = getMixdropFID(playerUrl);
         if (!fid) throw new Error('FID não encontrado: ' + playerUrl);
 
