@@ -92,8 +92,20 @@ const extractId = (url) => {
 const cleanText = (text) => text ? text.replace(/\n/g, '').trim() : '';
 
 const extractVideoId = (html) => {
-    const match = html.match(/C_Video\(['"]([\w\d]+)['"]\s*,\s*['"]mixdrop['"]/i);
-    return match ? match[1] : null;
+    // 1. onclick="C_Video('ID','mixdrop')" em qualquer elemento HTML
+    const onclickMatch = html.match(/onclick=["']C_Video\(['"]([\w\d]+)['"]\s*,\s*['"]mixdrop['"]\)/i);
+    if (onclickMatch) return onclickMatch[1];
+
+    // 2. C_Video('ID','mixdrop') em qualquer lugar (scripts, inline JS, etc.)
+    const genericMatch = html.match(/C_Video\(['"]([\w\d]+)['"]\s*,\s*['"]mixdrop['"]\)/i);
+    if (genericMatch) return genericMatch[1];
+
+    // 3. id="mixdrop" com data-id contendo o ID
+    const dataIdMatch = html.match(/id=["']mixdrop["'][^>]*data-id=["']([\w\d]+)["']/i)
+        || html.match(/data-id=["']([\w\d]+)["'][^>]*id=["']mixdrop["']/i);
+    if (dataIdMatch) return dataIdMatch[1];
+
+    return null;
 };
 
 const parseCard = ($, element) => {
