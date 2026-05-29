@@ -51,8 +51,13 @@ const extractId = (url) => {
 const cleanText = (text) => text ? text.replace(/\n/g, '').trim() : '';
 
 const extractVideoId = (html) => {
-    const match = html.match(/C_Video\(['"](\d+)['"]/);
-    return match ? match[1] : null;
+    const match = html.match(/C_Video\(['"](\d+)['"]\s*,\s*['"]([^'"]+)['"]\s*,\s*['"]?([^'")]*?)['"]?\)/);
+    if (!match) return null;
+    return {
+        id: match[1],
+        sv: match[2],
+        extra: match[3] || null
+    };
 };
 
 const parseCard = ($, element) => {
@@ -353,12 +358,15 @@ app.get('/v1/info', async (req, res) => {
         const year = $('.infos span').eq(1).text().trim();
         const imdb = $('.imdb').text().trim();
 
-        const videoId = extractVideoId(response.data);
+        const videoInfo = extractVideoId(response.data);
+        const videoId = videoInfo?.id || null;
+        const defaultSv = videoInfo?.sv || 'mixdrop';
         const pageId = extractId(url);
 
         const result = {
             id: pageId,
             video_id: videoId,
+            default_sv: defaultSv,
             title,
             is_series: isSeries,
             year,
@@ -448,10 +456,12 @@ app.get('/v1/play', async (req, res) => {
 
     try {
         const response = await api.get(url);
-        const videoId = extractVideoId(response.data);
-        if (!videoId) return res.status(404).json({ error: "video_id não encontrado na página" });
+        const videoInfo = extractVideoId(response.data);
+        if (!videoInfo) return res.status(404).json({ error: "video_id não encontrado na página" });
 
-        const playerUrl = await followGetplay(videoId, server);
+        const videoId = videoInfo.id;
+        const serverName = sv || videoInfo.sv || server;
+        const playerUrl = await followGetplay(videoId, serverName);
         const fid = getMixdropFID(playerUrl);
         if (!fid) throw new Error('FID não encontrado: ' + playerUrl);
 
@@ -521,4 +531,3 @@ if (require.main === module) {
 }
 
 module.exports = app;
-
