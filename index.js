@@ -19,7 +19,7 @@ app.use((req, res, next) => {
 });
 
 const BASE_URL = 'https://www.pobreflixtv.autos';
-const FALLBACK_TOKEN = 'f3981b7851ab13ac1e33';
+const FALLBACK_TOKEN = '0d3aea9faaa5feda8141';
 
 const api = axios.create({
     baseURL: BASE_URL,
