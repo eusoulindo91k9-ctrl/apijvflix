@@ -423,7 +423,7 @@ app.get('/v1/watch/:id', async (req, res) => {
         videoSessions.set(sessionId, { mp4Url: directUrl, cookies, referer });
 
         const streamUrl = `/api/stream/${sessionId}`;
-        const host = `https://${req.get('host')}`;
+        const host = `https://apijvflix.vercel.app`;
 
         // Retorna JSON com as informações ou redireciona pro stream
         return res.json({
@@ -461,7 +461,7 @@ app.get('/v1/play', async (req, res) => {
         const sessionId = Math.random().toString(36).substring(2, 15);
         videoSessions.set(sessionId, { mp4Url: directUrl, cookies, referer });
 
-        const host = `https://${req.get('host')}`;
+        const host = `${req.protocol}://${req.get('host')}`;
         return res.json({
             title,
             fid,
