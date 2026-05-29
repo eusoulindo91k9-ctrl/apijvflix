@@ -52,7 +52,7 @@ const extractId = (url) => {
 const cleanText = (text) => text ? text.replace(/\n/g, '').trim() : '';
 
 const extractVideoId = (html) => {
-    const match = html.match(/C_Video\(['"](\d+)['"]\s*,/);
+    const match = html.match(/C_Video\(['"](\d+)['"]/);
     return match ? match[1] : null;
 };
 
@@ -107,7 +107,7 @@ const extractMixdropUrl = (html) => {
 // --- GETPLAY: segue getplay.php e retorna URL do mixdrop ---
 
 const followGetplay = async (videoId, sv = 'mixdrop') => {
-    const getplayUrl = `${BASE_URL}/e/getembed.php?id=${videoId}&sv=${sv}&token=${TOKEN}`;
+    const getplayUrl = `${BASE_URL}/e/getplay.php?id=${videoId}&sv=${sv}&token=${TOKEN}`;
 
     const resp = await axios.get(getplayUrl, {
         headers: { ...mixdropHeaders, 'Referer': `${BASE_URL}/` },
@@ -340,9 +340,9 @@ app.get('/v1/info', async (req, res) => {
     if (!url.startsWith('http')) url = BASE_URL + url;
 
     try {
-        let fetchUrl = url.includes('?') ? `${url}&area=online` : `${url}?area=online`;
-        if (season) fetchUrl += `&temporada=${season}`;
-        const response = await api.get(fetchUrl);
+        if (!url.includes('area=online')) url = url.includes('?') ? `${url}&area=online` : `${url}?area=online`;
+        if (season) url = url.includes('?') ? `${url}&temporada=${season}` : `${url}?temporada=${season}`;
+        const response = await api.get(url);
         const $ = cheerio.load(response.data);
 
         const listagem = $('#listagem');
@@ -449,8 +449,8 @@ app.get('/v1/play', async (req, res) => {
     const server = sv || 'mixdrop';
 
     try {
-        const fetchUrl = url.includes('?') ? `${url}&area=online` : `${url}?area=online`;
-        const response = await api.get(fetchUrl);
+        if (!url.includes('area=online')) url = url.includes('?') ? `${url}&area=online` : `${url}?area=online`;
+        const response = await api.get(url);
         const videoId = extractVideoId(response.data);
         if (!videoId) return res.status(404).json({ error: "video_id não encontrado na página" });
 
@@ -524,3 +524,4 @@ if (require.main === module) {
 }
 
 module.exports = app;
+
