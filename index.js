@@ -19,7 +19,7 @@ app.use((req, res, next) => {
 });
 
 const BASE_URL = 'https://www.pobreflixtv.autos';
-const FALLBACK_TOKEN = '0d3aea9faaa5feda8141';
+const TOKEN = '0d3aea9faaa5feda8141';
 
 const api = axios.create({
     baseURL: BASE_URL,
@@ -51,99 +51,9 @@ const extractId = (url) => {
 
 const cleanText = (text) => text ? text.replace(/\n/g, '').trim() : '';
 
-/**
- * Extrai o video_id do HTML usando múltiplos padrões como fallback.
- * Antes só buscava C_Video('12345'), agora também busca em:
- *   - redirect.php?sv=...&id=12345&token=...
- *   - getembed.php?sv=...&id=12345&token=...
- *   - Variantes com aspas HTML-encoded (&#39;, &#x27;, &apos;)
- */
 const extractVideoId = (html) => {
-    if (!html || typeof html !== 'string') return null;
-
-    // Decodifica entidades HTML comuns nas aspas para evitar falhas no regex
-    const decoded = html
-        .replace(/&#39;/g, "'")
-        .replace(/&#x27;/g, "'")
-        .replace(/&apos;/g, "'")
-        .replace(/&quot;/g, '"');
-
-    // Padrão 1: C_Video('70596','...') ou C_Video("70596","...")
-    let match = decoded.match(/C_Video\(['"](\d+)['"]/);
-    if (match) return match[1];
-
-    // Padrão 2: redirect.php?sv=filemoon&id=70596&token=...
-    match = html.match(/redirect\.php\?[^\s"']*&(?:amp;)?id=(\d+)/);
-    if (match) return match[1];
-
-    // Padrão 2b: redirect.php?sv=filemoon&id=70596 (id como primeiro param)
-    match = html.match(/redirect\.php\?[^\s"']*\bid=(\d+)/);
-    if (match) return match[1];
-
-    // Padrão 3: getembed.php?sv=...&id=70596&token=...
-    match = html.match(/getembed\.php\?[^\s"']*&(?:amp;)?id=(\d+)/);
-    if (match) return match[1];
-
-    // Padrão 3b: getembed.php?sv=...&id=70596 (id como primeiro param após ?)
-    match = html.match(/getembed\.php\?[^\s"']*\bid=(\d+)/);
-    if (match) return match[1];
-
-    // Padrão 4: Busca genérica em data-attrs ou onclick com id numérico longo
-    // Alguns templates usam data-id="70596" nos elementos de player
-    match = html.match(/data-video-id=['"](\d+)['"]/i);
-    if (match) return match[1];
-
-    return null;
-};
-
-/**
- * Extrai o token do HTML da página (usado em redirect.php e getembed.php).
- * O token muda periodicamente e era hardcoded, causando falhas.
- */
-const extractToken = (html) => {
-    if (!html || typeof html !== 'string') return FALLBACK_TOKEN;
-
-    // Busca token em redirect.php?sv=...&id=...&token=XXXXX
-    let match = html.match(/redirect\.php\?[^\s"']*token=([a-f0-9]+)/i);
-    if (match) return match[1];
-
-    // Busca token em getembed.php (dentro de scripts)
-    match = html.match(/getembed\.php\?[^\s"']*token=([a-f0-9]+)/i);
-    if (match) return match[1];
-
-    // Busca token em atributos data-token
-    match = html.match(/data-token=['"]([a-f0-9]+)['"]/i);
-    if (match) return match[1];
-
-    // Busca token como variável JS: token = "XXXXX" ou token='XXXXX'
-    match = html.match(/token\s*=\s*['"]([a-f0-9]+)['"]/i);
-    if (match) return match[1];
-
-    return FALLBACK_TOKEN;
-};
-
-/**
- * Extrai os servidores disponíveis a partir dos links redirect.php no HTML.
- * Retorna array de objetos { sv, id, token, url }.
- */
-const extractServers = (html) => {
-    if (!html || typeof html !== 'string') return [];
-
-    const servers = [];
-    const regex = /redirect\.php\?sv=([^&"'\s]+)&id=(\d+)&token=([a-f0-9]+)/gi;
-    let m;
-
-    while ((m = regex.exec(html)) !== null) {
-        const sv = m[1];
-        const id = m[2];
-        const token = m[3];
-        // Evita duplicatas
-        if (!servers.find(s => s.sv === sv)) {
-            servers.push({ sv, id, token, url: `${BASE_URL}/e/redirect.php?sv=${sv}&id=${id}&token=${token}` });
-        }
-    }
-
-    return servers;
+    const match = html.match(/C_Video\(['"](\d+)['"]/);
+    return match ? match[1] : null;
 };
 
 const parseCard = ($, element) => {
@@ -196,9 +106,8 @@ const extractMixdropUrl = (html) => {
 
 // --- GETPLAY: segue getplay.php e retorna URL do mixdrop ---
 
-const followGetplay = async (videoId, sv = 'mixdrop', token = null) => {
-    const useToken = token || FALLBACK_TOKEN;
-    const getplayUrl = `${BASE_URL}/e/getplay.php?id=${videoId}&sv=${sv}&token=${useToken}`;
+const followGetplay = async (videoId, sv = 'mixdrop') => {
+    const getplayUrl = `${BASE_URL}/e/getplay.php?id=${videoId}&sv=${sv}&token=${TOKEN}`;
 
     const resp = await axios.get(getplayUrl, {
         headers: { ...mixdropHeaders, 'Referer': `${BASE_URL}/` },
@@ -237,51 +146,6 @@ const followGetplay = async (videoId, sv = 'mixdrop', token = null) => {
     if (resp.data?.link) return resp.data.link;
 
     throw new Error(`getplay.php nao retornou URL do mixdrop. Status: ${resp.status}. Resposta: ${String(resp.data).slice(0, 300)}`);
-};
-
-/**
- * Segue o redirect.php diretamente (alternativa ao getplay.php).
- * Usado como fallback quando getplay.php falha.
- */
-const followRedirect = async (redirectUrl) => {
-    try {
-        const resp = await axios.get(redirectUrl, {
-            headers: { ...mixdropHeaders, 'Referer': `${BASE_URL}/` },
-            maxRedirects: 5,
-            timeout: 15000,
-            validateStatus: () => true,
-        });
-
-        // Verifica se a URL final é um link mixdrop
-        const finalUrl = resp.request?.res?.responseUrl || resp.headers?.location || '';
-        if (getMixdropFID(finalUrl)) return finalUrl;
-
-        // Busca iframe ou redirect no HTML
-        if (typeof resp.data === 'string') {
-            const fromHtml = extractMixdropUrl(resp.data);
-            if (fromHtml) return fromHtml;
-
-            // Busca meta refresh redirect
-            const metaMatch = resp.data.match(/<meta[^>]*http-equiv=["']?refresh["']?[^>]*content=["']?\d+;\s*url=([^"'\s>]+)/i);
-            if (metaMatch) {
-                let metaUrl = metaMatch[1];
-                if (metaUrl.startsWith('//')) metaUrl = 'https:' + metaUrl;
-                if (getMixdropFID(metaUrl)) return metaUrl;
-            }
-
-            // Busca window.location no JS
-            const jsMatch = resp.data.match(/(?:window\.location|location\.href)\s*=\s*["']([^"']+)["']/i);
-            if (jsMatch) {
-                let jsUrl = jsMatch[1];
-                if (jsUrl.startsWith('//')) jsUrl = 'https:' + jsUrl;
-                if (getMixdropFID(jsUrl)) return jsUrl;
-            }
-        }
-
-        throw new Error('redirect.php nao retornou URL do mixdrop');
-    } catch (err) {
-        throw new Error(`redirect.php falhou: ${err.message}`);
-    }
 };
 
 // --- UNPACK (p,a,c,k,e,d) ---
@@ -331,7 +195,7 @@ const MIXDROP_API_KEY  = 'u3aH2kgUYOQ36hd';
 
 const resolveMixdrop = async (fid) => {
     // 1. Verifica existência via API oficial
-    const apiUrl = `${MIXDROP_API}/fileinfo?email=${encodeURIComponent(MIXDROP_API_MAIL)}&key=${encodeURIComponent(MIXDROP_API_KEY)}&ref[]=${fid}`;
+    const apiUrl = `${MIXDROP_API}/fileinfo?email=${encodeURIComponent(MIXDROP_API_MAIL)}&key=${MIXDROP_API_KEY}&ref[]=${fid}`;
     const apiResp = await axios.get(apiUrl, { headers: mixdropHeaders, timeout: 15000 });
     const json = apiResp.data;
 
@@ -415,7 +279,6 @@ app.get('/', (req, res) => {
             search: "/v1/search?s=nome",
             info: "/v1/info?url=link_completo",
             watch: "/v1/watch/:id",
-            play: "/v1/play?url=link_completo",
             stream: "/api/stream/:sessionId"
         }
     });
@@ -479,8 +342,7 @@ app.get('/v1/info', async (req, res) => {
     try {
         const fetchUrl = season ? `${url}?temporada=${season}` : url;
         const response = await api.get(fetchUrl);
-        const html = response.data;
-        const $ = cheerio.load(html);
+        const $ = cheerio.load(response.data);
 
         const listagem = $('#listagem');
         const breadcrumb = $('.breadcrumb').text();
@@ -492,20 +354,12 @@ app.get('/v1/info', async (req, res) => {
         const year = $('.infos span').eq(1).text().trim();
         const imdb = $('.imdb').text().trim();
 
-        // Extrai video_id com múltiplos fallbacks
-        const videoId = extractVideoId(html);
+        const videoId = extractVideoId(response.data);
         const pageId = extractId(url);
-
-        // Extrai token dinamicamente do HTML (ao invés de hardcoded)
-        const token = extractToken(html);
-
-        // Extrai servidores disponíveis dos links redirect.php
-        const servers = extractServers(html);
 
         const result = {
             id: pageId,
             video_id: videoId,
-            token: token,
             title,
             is_series: isSeries,
             year,
@@ -513,7 +367,6 @@ app.get('/v1/info', async (req, res) => {
             thumb,
             description: desc,
             episodes: [],
-            servers: servers,
             watch_link: null
         };
 
@@ -537,7 +390,7 @@ app.get('/v1/info', async (req, res) => {
             result.episodes = episodes.sort((a, b) => a.order - b.order);
         } else {
             const watchId = videoId || pageId;
-            result.watch_link = `${req.protocol}://${req.get('host')}/v1/watch/${watchId}?token=${token}`;
+            result.watch_link = `${req.protocol}://${req.get('host')}/v1/watch/${watchId}`;
         }
 
         res.json(result);
@@ -552,43 +405,27 @@ app.get('/v1/info', async (req, res) => {
 app.get('/v1/watch/:id', async (req, res) => {
     const { id } = req.params;
     const sv = req.query.sv || 'mixdrop';
-    const token = req.query.token || null;
+    const asJson = req.query.json === '1';
 
     if (!id) return res.status(400).json({ error: "ID inválido" });
 
     try {
-        // 1. Tenta getplay.php com token dinâmico
-        let playerUrl;
-        try {
-            playerUrl = await followGetplay(id, sv, token);
-        } catch (getplayErr) {
-            console.warn('[watch] getplay.php falhou, tentando redirect.php:', getplayErr.message);
-
-            // 2. Fallback: Se temos info do servidor (redirect.php), tenta seguir o redirect
-            // Constrói a URL do redirect.php como fallback
-            const fallbackToken = token || FALLBACK_TOKEN;
-            const redirectUrl = `${BASE_URL}/e/redirect.php?sv=${sv}&id=${id}&token=${fallbackToken}`;
-            try {
-                playerUrl = await followRedirect(redirectUrl);
-            } catch (redirectErr) {
-                throw new Error(`getplay.php e redirect.php falharam. getplay: ${getplayErr.message} | redirect: ${redirectErr.message}`);
-            }
-        }
-
+        // 1. getplay.php → URL do mixdrop
+        const playerUrl = await followGetplay(id, sv);
         const fid = getMixdropFID(playerUrl);
         if (!fid) throw new Error('FID não encontrado: ' + playerUrl);
 
-        // 3. Resolve MP4 + cookies
+        // 2. Resolve MP4 + cookies
         const { directUrl, cookies, referer, title } = await resolveMixdrop(fid);
 
-        // 4. Salva sessão para o proxy de stream
+        // 3. Salva sessão para o proxy de stream
         const sessionId = Math.random().toString(36).substring(2, 15);
         videoSessions.set(sessionId, { mp4Url: directUrl, cookies, referer });
 
         const streamUrl = `/api/stream/${sessionId}`;
-        const host = `https://apijvflix.vercel.app`;
+        const host = `https://${req.get('host')}`;
 
-        // Retorna JSON com as informações
+        // Retorna JSON com as informações ou redireciona pro stream
         return res.json({
             title,
             fid,
@@ -612,22 +449,10 @@ app.get('/v1/play', async (req, res) => {
 
     try {
         const response = await api.get(url);
-        const html = response.data;
-        const videoId = extractVideoId(html);
+        const videoId = extractVideoId(response.data);
         if (!videoId) return res.status(404).json({ error: "video_id não encontrado na página" });
 
-        const token = extractToken(html);
-
-        // Tenta getplay.php primeiro, depois redirect.php como fallback
-        let playerUrl;
-        try {
-            playerUrl = await followGetplay(videoId, server, token);
-        } catch (getplayErr) {
-            console.warn('[play] getplay.php falhou, tentando redirect.php:', getplayErr.message);
-            const redirectUrl = `${BASE_URL}/e/redirect.php?sv=${server}&id=${videoId}&token=${token}`;
-            playerUrl = await followRedirect(redirectUrl);
-        }
-
+        const playerUrl = await followGetplay(videoId, server);
         const fid = getMixdropFID(playerUrl);
         if (!fid) throw new Error('FID não encontrado: ' + playerUrl);
 
@@ -636,7 +461,7 @@ app.get('/v1/play', async (req, res) => {
         const sessionId = Math.random().toString(36).substring(2, 15);
         videoSessions.set(sessionId, { mp4Url: directUrl, cookies, referer });
 
-        const host = `${req.protocol}://${req.get('host')}`;
+        const host = `https://${req.get('host')}`;
         return res.json({
             title,
             fid,
@@ -697,4 +522,3 @@ if (require.main === module) {
 }
 
 module.exports = app;
-
