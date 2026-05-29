@@ -109,15 +109,6 @@ const extractVideoId = (html) => {
         || html.match(/[?&]id=(\w+)&(?:amp;)?(?:sv|token)=/i);
     if (svMixdropMatch) return svMixdropMatch[1];
 
-    // 5. data-pageID no body (fallback da página toda)
-    const pageIdMatch = html.match(/data-pageID=['"]?(\d+)['"]?/i);
-    if (pageIdMatch) return pageIdMatch[1];
-
-    // 6. id="mixdrop" com data-id contendo o ID
-    const dataIdMatch = html.match(/id=["']mixdrop["'][^>]*data-id=["'](\w+)["']/i)
-        || html.match(/data-id=["'](\w+)["'][^>]*id=["']mixdrop["']/i);
-    if (dataIdMatch) return dataIdMatch[1];
-
     return null;
 };
 
