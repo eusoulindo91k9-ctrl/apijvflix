@@ -12,13 +12,14 @@ app.use(express.json());
 app.use((req, res, next) => {
     res.removeHeader("X-Frame-Options");
     res.setHeader(
-      "Content-Security-Policy",
-      "default-src * 'unsafe-inline' 'unsafe-eval' data: blob:; frame-src *; child-src *; connect-src *; script-src * 'unsafe-inline' 'unsafe-eval';"
+        "Content-Security-Policy",
+        "default-src * 'unsafe-inline' 'unsafe-eval' data: blob:; frame-src *; child-src *; connect-src *; script-src * 'unsafe-inline' 'unsafe-eval';"
     );
     next();
 });
 
 const BASE_URL = 'https://www.pobreflixtv.autos';
+const TOKEN = 'f3981b7851ab13ac1e33';
 
 const api = axios.create({
     baseURL: BASE_URL,
@@ -31,111 +32,17 @@ const api = axios.create({
     timeout: 15000
 });
 
-const TOKEN = 'f3981b7851ab13ac1e33';
-
-// Domínios de anúncio conhecidos para bloquear
-const AD_DOMAINS = [
-    'doubleclick.net', 'googlesyndication.com', 'googletagmanager.com',
-    'googletagservices.com', 'google-analytics.com', 'adservice.google.com',
-    'pagead2.googlesyndication.com', 'adnxs.com', 'adsrvr.org',
-    'advertising.com', 'outbrain.com', 'taboola.com', 'revcontent.com',
-    'mgid.com', 'propellerads.com', 'popads.net', 'popcash.net',
-    'trafficjunky.com', 'exoclick.com', 'juicyads.com', 'adsterra.com',
-    'hilltopads.net', 'plugrush.com', 'ero-advertising.com',
-    'contentabc.com', 'traffic-media.co', 'clickadu.com', 'adcash.com',
-    'bidvertiser.com', 'yllix.com', 'a-ads.com', 'coinzilla.io',
-    'parodostaunter.qpon', 'am.parodostaunter.qpon',
-    'etv-embed.icu',
-];
-
-// Script injetado no HTML do embed para bloquear ads client-side
-const AD_BLOCKER_SCRIPT = `
-<script>
-(function() {
-    // Bloqueia window.open (popups/popunders)
-    window.open = function() { return null; };
-
-    // Bloqueia criação de elementos de anúncio
-    const AD_DOMAINS = ${JSON.stringify(AD_DOMAINS)};
-    const _createElement = document.createElement.bind(document);
-    document.createElement = function(tag) {
-        const el = _createElement(tag);
-        if (tag.toLowerCase() === 'script' || tag.toLowerCase() === 'iframe') {
-            const _setSrc = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'setAttribute');
-            const origSet = el.setAttribute.bind(el);
-            el.setAttribute = function(name, value) {
-                if ((name === 'src' || name === 'href') && value) {
-                    if (AD_DOMAINS.some(d => value.includes(d))) {
-                        return;
-                    }
-                }
-                return origSet(name, value);
-            };
-        }
-        return el;
-    };
-
-    // Observa o DOM e remove elementos de ad assim que aparecem
-    const observer = new MutationObserver(function(mutations) {
-        mutations.forEach(function(mutation) {
-            mutation.addedNodes.forEach(function(node) {
-                if (!node.src && !node.href && !node.tagName) return;
-                const src = node.src || node.href || '';
-                if (AD_DOMAINS.some(d => src.includes(d))) {
-                    node.remove();
-                }
-                // Remove iframes de popunder
-                if (node.tagName === 'IFRAME' && node.style && 
-                    (node.style.zIndex > 9000 || node.width == 0 || node.height == 0)) {
-                    node.remove();
-                }
-            });
-        });
-    });
-    observer.observe(document.documentElement, { childList: true, subtree: true });
-
-    // Bloqueia navegação forçada por redirect
-    const _pushState = history.pushState.bind(history);
-    window.addEventListener('beforeunload', function(e) {
-        e.stopImmediatePropagation();
-    });
-})();
-</script>
-`;
-
-// Faz fetch server-side do embed, injeta ad blocker e serve HTML limpo
-const fetchAndCleanEmbed = async (embedUrl) => {
-    const response = await axios.get(embedUrl, {
-        headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Referer': BASE_URL + '/',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        },
-        timeout: 15000,
-        responseType: 'text'
-    });
-
-    let html = response.data;
-
-    // Remove scripts de domínios de ad
-    AD_DOMAINS.forEach(domain => {
-        const regex = new RegExp(`<script[^>]*src=["'][^"']*${domain.replace('.', '\\.')}[^"']*["'][^>]*>.*?</script>`, 'gis');
-        html = html.replace(regex, '<!-- ad blocked -->');
-        const iframeRegex = new RegExp(`<iframe[^>]*src=["'][^"']*${domain.replace('.', '\\.')}[^"']*["'][^>]*>.*?</iframe>`, 'gis');
-        html = html.replace(iframeRegex, '<!-- ad blocked -->');
-    });
-
-    // Injeta o script bloqueador logo após o <head>
-    html = html.replace(/<head>/i, '<head>' + AD_BLOCKER_SCRIPT);
-    // Fallback se não tiver <head>
-    if (!html.includes(AD_BLOCKER_SCRIPT)) {
-        html = AD_BLOCKER_SCRIPT + html;
-    }
-
-    return html;
+const mixdropHeaders = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8',
 };
 
-// Extrai o ID da URL do tipo: /assistir-nome-123/ → "123"
+// Sessões em memória para o proxy de stream
+const videoSessions = new Map();
+
+// --- HELPERS GERAIS ---
+
 const extractId = (url) => {
     if (!url) return null;
     const matches = url.match(/-(\d+)\/?$/);
@@ -144,7 +51,6 @@ const extractId = (url) => {
 
 const cleanText = (text) => text ? text.replace(/\n/g, '').trim() : '';
 
-// Extrai o ID real do player a partir do C_Video('XXXXX','server') na página
 const extractVideoId = (html) => {
     const match = html.match(/C_Video\(['"](\d+)['"]/);
     return match ? match[1] : null;
@@ -175,7 +81,194 @@ const parseCard = ($, element) => {
     } catch (e) { return null; }
 };
 
-// --- ROTAS ---
+// --- MIXDROP: extração de FID e URL ---
+
+const getMixdropFID = (url) => {
+    if (!url) return null;
+    const m = url.match(/(?:mixdrop\.[a-z]+|mdy48tn97\.com|mdbekjwqa\.pw|mdfx9dc8n\.net|mdzsmutpcvykb\.net)\/(?:f|e)\/([a-z0-9]+)/i);
+    return m ? m[1] : null;
+};
+
+const extractMixdropUrl = (html) => {
+    const MD = '(?:mixdrop\\.[a-z]+|mdy48tn97\\.com|mdbekjwqa\\.pw|mdfx9dc8n\\.net|mdzsmutpcvykb\\.net)';
+    const patterns = [
+        new RegExp('<iframe[^>]+src=["\']((?:https?:)?//' + MD + '/(?:e|f)/[a-z0-9]+[^"\']*)', 'i'),
+        new RegExp('(?:window\\.location|location\\.href)\\s*=\\s*["\']((?:https?:)?//' + MD + '/(?:e|f)/[a-z0-9]+[^"\']*)', 'i'),
+        new RegExp('src\\s*[:=]\\s*["\']((?:https?:)?//' + MD + '/(?:e|f)/[a-z0-9]+[^"\']*)', 'i'),
+        new RegExp('["\'](https?://' + MD + '/(?:e|f)/[a-z0-9]+)', 'i'),
+    ];
+    for (const pat of patterns) {
+        const m = html.match(pat);
+        if (m) return m[1].startsWith('//') ? 'https:' + m[1] : m[1];
+    }
+    return null;
+};
+
+// --- GETPLAY: segue getplay.php e retorna URL do mixdrop ---
+
+const followGetplay = async (videoId, sv = 'mixdrop') => {
+    const getplayUrl = `${BASE_URL}/e/getplay.php?id=${videoId}&sv=${sv}&token=${TOKEN}`;
+
+    const resp = await axios.get(getplayUrl, {
+        headers: { ...mixdropHeaders, 'Referer': `${BASE_URL}/` },
+        maxRedirects: 0,
+        timeout: 15000,
+        validateStatus: (status) => status < 500,
+    });
+
+    // Caso 1: 302 com Location header
+    const location = resp.headers?.location;
+    if (location) {
+        const url = location.startsWith('//') ? 'https:' + location : location;
+        if (getMixdropFID(url)) return url;
+        const resp2 = await axios.get(url, {
+            headers: { ...mixdropHeaders, 'Referer': getplayUrl },
+            maxRedirects: 5,
+            timeout: 15000,
+            validateStatus: () => true,
+        });
+        const loc2 = resp2.headers?.location || resp2.request?.res?.responseUrl || '';
+        if (getMixdropFID(loc2)) return loc2;
+        if (typeof resp2.data === 'string') {
+            const fromHtml = extractMixdropUrl(resp2.data);
+            if (fromHtml) return fromHtml;
+        }
+    }
+
+    // Caso 2: HTML com link do mixdrop
+    if (typeof resp.data === 'string') {
+        const fromHtml = extractMixdropUrl(resp.data);
+        if (fromHtml) return fromHtml;
+    }
+
+    // Caso 3: JSON
+    if (resp.data?.url) return resp.data.url;
+    if (resp.data?.link) return resp.data.link;
+
+    throw new Error(`getplay.php nao retornou URL do mixdrop. Status: ${resp.status}. Resposta: ${String(resp.data).slice(0, 300)}`);
+};
+
+// --- UNPACK (p,a,c,k,e,d) ---
+
+function unpackPacker(source) {
+    const args = source.match(/\}\('([\s\S]*)', *(\d+), *(\d+), *'([\s\S]*)'\.split\('\|'\)/);
+    if (!args) return source;
+
+    const payload = args[1];
+    const radix = parseInt(args[2]);
+    const symtab = args[4].split('|');
+
+    const lookup = (match) => {
+        try {
+            const index = parseInt(match, radix);
+            if (index < symtab.length && symtab[index]) return symtab[index];
+        } catch (e) {}
+        return match;
+    };
+
+    return payload.replace(/\b\w+\b/g, lookup);
+}
+
+function extractVideoFromUnpacked(unpacked) {
+    const patterns = [
+        /MDCore\.wurl="([^"]+)"/,
+        /MDCore\.\w+="([^"]+\.mp4[^"]*)"/,
+        /https?:\/\/[^"']+\.mp4[^"']*/,
+        /\/\/[^"']+\.mp4[^"']*/
+    ];
+    for (const pattern of patterns) {
+        const match = unpacked.match(pattern);
+        if (match) {
+            let url = match[1] || match[0];
+            if (url.startsWith("//")) url = "https:" + url;
+            return url;
+        }
+    }
+    return null;
+}
+
+// --- RESOLVE MIXDROP: FID → MP4 direto ---
+
+const MIXDROP_API      = 'https://api.mixdrop.ag';
+const MIXDROP_API_MAIL = 'psp@jdownloader.org';
+const MIXDROP_API_KEY  = 'u3aH2kgUYOQ36hd';
+
+const resolveMixdrop = async (fid) => {
+    // 1. Verifica existência via API oficial
+    const apiUrl = `${MIXDROP_API}/fileinfo?email=${encodeURIComponent(MIXDROP_API_MAIL)}&key=${MIXDROP_API_KEY}&ref[]=${fid}`;
+    const apiResp = await axios.get(apiUrl, { headers: mixdropHeaders, timeout: 15000 });
+    const json = apiResp.data;
+
+    if (!json.success) throw new Error('Arquivo não encontrado no mixdrop');
+    const fileInfo = json.result[0];
+    if (fileInfo.deleted) throw new Error('Arquivo deletado no mixdrop');
+
+    // 2. Acessa a página embed e pega cookies
+    const embedUrl = `https://mixdrop.top/e/${fid}`;
+    const pageResp = await axios.get(embedUrl, {
+        headers: { ...mixdropHeaders, 'Referer': 'https://mixdrop.top/' },
+        timeout: 15000
+    });
+
+    const rawCookies = pageResp.headers['set-cookie'];
+    let cookieString = '';
+    if (rawCookies) {
+        cookieString = rawCookies.map(c => c.split(';')[0]).join('; ');
+    }
+
+    let html = pageResp.data;
+
+    // 3. Tenta extrair MP4 por padrões diretos no JS
+    let directUrl = null;
+    const directPatterns = [
+        /MDCore\.wurl\s*=\s*["']([^"']+\.mp4[^"']*)/i,
+        /"videoUrl"\s*:\s*["']([^"']+\.mp4[^"']*)/i,
+        /source\s+src=["']([^"']+\.mp4[^"']*)/i,
+        /file\s*:\s*["']([^"']+\.mp4[^"']*)/i,
+        /["'](https?:\/\/[^"']*\.mp4[^"']*)/i,
+    ];
+    for (const pat of directPatterns) {
+        const m = html.match(pat);
+        if (m) { directUrl = m[1]; break; }
+    }
+
+    // 4. Tenta via unpack (p,a,c,k,e,d)
+    if (!directUrl) {
+        const packedMatch = html.match(/(eval\(function\(p,a,c,k,e,d[\s\S]*?<\/script>)/);
+        if (packedMatch) {
+            const unpacked = unpackPacker(packedMatch[1]);
+            directUrl = extractVideoFromUnpacked(unpacked);
+        }
+    }
+
+    // 5. Tenta link ?download
+    if (!directUrl) {
+        const continueMatch = html.match(/((?:\/f\/[a-z0-9]+)?\?download)/i);
+        if (continueMatch) {
+            const continueResp = await axios.get(`https://mixdrop.top${continueMatch[1]}`, {
+                headers: { ...mixdropHeaders, 'Referer': embedUrl },
+                timeout: 15000
+            });
+            html = continueResp.data;
+            for (const pat of directPatterns) {
+                const m = html.match(pat);
+                if (m) { directUrl = m[1]; break; }
+            }
+        }
+    }
+
+    if (!directUrl) throw new Error('Não foi possível extrair o link direto do mixdrop');
+    if (directUrl.startsWith('//')) directUrl = 'https:' + directUrl;
+
+    return {
+        directUrl,
+        cookies: cookieString,
+        referer: 'https://mixdrop.top',
+        title: fileInfo.title || fid
+    };
+};
+
+// --- ROTAS GERAIS ---
 
 app.get('/', (req, res) => {
     res.json({
@@ -185,7 +278,8 @@ app.get('/', (req, res) => {
             home: "/v1/get/recommeds",
             search: "/v1/search?s=nome",
             info: "/v1/info?url=link_completo",
-            watch: "/v1/watch/:id"
+            watch: "/v1/watch/:id",
+            stream: "/api/stream/:sessionId"
         }
     });
 });
@@ -260,13 +354,12 @@ app.get('/v1/info', async (req, res) => {
         const year = $('.infos span').eq(1).text().trim();
         const imdb = $('.imdb').text().trim();
 
-        // ID real do player (C_Video) — diferente do ID da URL
         const videoId = extractVideoId(response.data);
         const pageId = extractId(url);
 
         const result = {
             id: pageId,
-            video_id: videoId, // ID real usado no embed
+            video_id: videoId,
             title,
             is_series: isSeries,
             year,
@@ -288,7 +381,7 @@ app.get('/v1/info', async (req, res) => {
                 if (epUrl) {
                     episodes.push({
                         name: epName,
-                        player_id: extractId(epUrl), // ID da URL do episódio (precisa de /v1/info para obter video_id)
+                        player_id: extractId(epUrl),
                         url: epUrl,
                         order: sortId
                     });
@@ -296,7 +389,6 @@ app.get('/v1/info', async (req, res) => {
             });
             result.episodes = episodes.sort((a, b) => a.order - b.order);
         } else {
-            // Usa video_id se disponível, senão cai no page id
             const watchId = videoId || pageId;
             result.watch_link = `${req.protocol}://${req.get('host')}/v1/watch/${watchId}`;
         }
@@ -308,372 +400,46 @@ app.get('/v1/info', async (req, res) => {
     }
 });
 
-// -------------------------------------------------------
-// MIXDROP RESOLVER — abordagem cookie + unpack JS (igual ao script Python)
-// Não depende da API do mixdrop. Faz sessão real, extrai cookie e unpacca
-// o script obfuscado (p,a,c,k,e,d) para achar o MDCore.wurl.
-// -------------------------------------------------------
+// --- ROTA WATCH: getplay.php → mixdrop → unpack → proxy ---
 
-const mixdropHeaders = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-    'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8',
-};
-
-// Extrai o file ID de uma URL mixdrop — cobre mixdrop.top, miixdrop.net e variantes
-const getMixdropFID = (url) => {
-    if (!url) return null;
-    const m = url.match(/(?:mi+xdrop\.[a-z]+|mdy48tn97\.com|mdbekjwqa\.pw|mdfx9dc8n\.net|mdzsmutpcvykb\.net)\/(?:f|e)\/([a-z0-9]+)/i);
-    return m ? m[1] : null;
-};
-
-// Detecta o domínio exato do mixdrop na URL para usar como base do embed e referer
-const getMixdropDomain = (url) => {
-    if (!url) return 'mixdrop.top';
-    const m = url.match(/https?:\/\/(mi+xdrop\.[a-z]+|mdy48tn97\.com|mdbekjwqa\.pw|mdfx9dc8n\.net|mdzsmutpcvykb\.net)/i);
-    return m ? m[1] : 'mixdrop.top';
-};
-
-// Unpacker do JS obfuscado no padrão eval(function(p,a,c,k,e,d){...})
-// Replica exatamente o que o script Python faz
-const unpackPacker = (source) => {
-    const args = source.match(/}\s*\(\s*'([\s\S]*)'\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*'([\s\S]*)'\s*\.split\s*\(\s*'\|'\s*\)/);
-    if (!args) return source;
-
-    let [, payload, radix, , symtabRaw] = args;
-    radix = parseInt(radix);
-    const symtab = symtabRaw.split('|');
-
-    const lookup = (word) => {
-        try {
-            const index = parseInt(word, radix);
-            if (!isNaN(index) && index < symtab.length && symtab[index]) {
-                return symtab[index];
-            }
-        } catch (e) { /* ignora */ }
-        return word;
-    };
-
-    return payload.replace(/\b\w+\b/g, lookup);
-};
-
-// Extrai cookies do header set-cookie e monta string "k=v; k2=v2"
-const parseCookies = (setCookieHeaders) => {
-    if (!setCookieHeaders) return '';
-    const headers = Array.isArray(setCookieHeaders) ? setCookieHeaders : [setCookieHeaders];
-    return headers
-        .map(h => h.split(';')[0].trim())
-        .filter(Boolean)
-        .join('; ');
-};
-
-// Resolve o MP4 direto a partir de um file ID mixdrop
-// Estratégia: sessão real com cookie, unpack do JS obfuscado
-// domain: domínio real detectado pelo followGetplay (ex: miixdrop.net)
-const resolveMixdrop = async (fid, domain = 'mixdrop.top') => {
-    const baseUrl = `https://${domain}`;
-    const embedUrl = `${baseUrl}/e/${fid}`;
-
-    // 1. Primeira requisição — pega os cookies de sessão (como o Python faz com requests.Session)
-    const firstResp = await axios.get(embedUrl, {
-        headers: { ...mixdropHeaders, 'Referer': baseUrl + '/' },
-        timeout: 20000,
-        maxRedirects: 5,
-        validateStatus: () => true,
-    });
-
-    // Coleta cookies da primeira resposta
-    const rawCookies = parseCookies(firstResp.headers['set-cookie']);
-    console.log('[mixdrop] cookies recebidos:', rawCookies || '(nenhum)');
-
-    // 2. Segunda requisição com o cookie setado (replica o comportamento do session.get() do Python)
-    const headersWithCookie = {
-        ...mixdropHeaders,
-        'Referer': baseUrl + '/',
-        ...(rawCookies ? { 'Cookie': rawCookies } : {}),
-    };
-
-    const pageResp = await axios.get(embedUrl, {
-        headers: headersWithCookie,
-        timeout: 20000,
-        maxRedirects: 5,
-        validateStatus: () => true,
-    });
-
-    // Atualiza cookies com o que veio na segunda resposta também
-    const cookies2 = parseCookies(pageResp.headers['set-cookie']);
-    const allCookies = [rawCookies, cookies2].filter(Boolean).join('; ');
-
-    let html = pageResp.data;
-    if (typeof html !== 'string') throw new Error('Resposta do mixdrop não é HTML');
-
-    // 3. Tenta extrair o link direto do HTML sem precisar fazer unpack
-    let directUrl = null;
-    const directPatterns = [
-        /MDCore\.wurl\s*=\s*["']([^"']+)/i,
-        /"videoUrl"\s*:\s*["']([^"']+\.mp4[^"']*)/i,
-        /source\s+src=["']([^"']+\.mp4[^"']*)/i,
-        /file\s*:\s*["']([^"']+\.mp4[^"']*)/i,
-    ];
-    for (const pat of directPatterns) {
-        const m = html.match(pat);
-        if (m && (m[1].includes('.mp4') || m[1].includes('cdn') || m[1].startsWith('//'))) {
-            directUrl = m[1];
-            break;
-        }
-    }
-
-    // 4. Se não achou, faz o UNPACK do JS obfuscado (lógica principal do script Python)
-    if (!directUrl) {
-        // Procura o bloco eval(function(p,a,c,k,e,d){...}) no HTML
-        const packedMatch = html.match(/eval\(function\(p,a,c,k,e,d\)[\s\S]*?\.split\('\|'\)\s*\)\s*\)/);
-        if (packedMatch) {
-            console.log('[mixdrop] script obfuscado encontrado, fazendo unpack...');
-            const unpacked = unpackPacker(packedMatch[0]);
-
-            // Agora procura no JS desempacotado
-            for (const pat of directPatterns) {
-                const m = unpacked.match(pat);
-                if (m && (m[1].includes('.mp4') || m[1].includes('cdn') || m[1].startsWith('//'))) {
-                    directUrl = m[1];
-                    console.log('[mixdrop] URL encontrada no unpacked JS:', directUrl);
-                    break;
-                }
-            }
-
-            // Fallback: qualquer .mp4 no JS desempacotado
-            if (!directUrl) {
-                const anyMp4 = unpacked.match(/["']((?:https?:)?\/\/[^"']+\.mp4[^"']*)/i);
-                if (anyMp4) directUrl = anyMp4[1];
-            }
-        }
-    }
-
-    if (!directUrl) throw new Error('Não foi possível extrair o link direto do mixdrop (url não encontrada no HTML nem no JS)');
-
-    // Garante https
-    if (directUrl.startsWith('//')) directUrl = 'https:' + directUrl;
-
-    console.log('[mixdrop] URL final resolvida:', directUrl);
-
-    // Retorna a URL e também os cookies — o player vai precisar deles
-    return { directUrl, title: fid, cookies: allCookies };
-};
-
-// Extrai URL do mixdrop de qualquer HTML
-const extractMixdropUrl = (html) => {
-    const MD = '(?:mixdrop\\.[a-z]+|mdy48tn97\\.com|mdbekjwqa\\.pw|mdfx9dc8n\\.net|mdzsmutpcvykb\\.net)';
-    const patterns = [
-        new RegExp('<iframe[^>]+src=["\']((?:https?:)?//'+MD+'/(?:e|f)/[a-z0-9]+[^"\']*)', 'i'),
-        new RegExp('(?:window\\.location|location\\.href)\\s*=\\s*["\']((?:https?:)?//'+MD+'/(?:e|f)/[a-z0-9]+[^"\']*)', 'i'),
-        new RegExp('src\\s*[:=]\\s*["\']((?:https?:)?//'+MD+'/(?:e|f)/[a-z0-9]+[^"\']*)', 'i'),
-        new RegExp('["\'](https?://'+MD+'/(?:e|f)/[a-z0-9]+)', 'i'),
-    ];
-    for (const pat of patterns) {
-        const m = html.match(pat);
-        if (m) return m[1].startsWith('//') ? 'https:' + m[1] : m[1];
-    }
-    return null;
-};
-
-// Segue o getplay.php e retorna a URL do mixdrop
-const followGetplay = async (videoId, sv = 'mixdrop') => {
-    const getplayUrl = `${BASE_URL}/e/getplay.php?id=${videoId}&sv=${sv}&token=${TOKEN}`;
-
-    // Não segue redirect — captura o Location do 302 diretamente
-    const resp = await axios.get(getplayUrl, {
-        headers: { ...mixdropHeaders, 'Referer': `${BASE_URL}/` },
-        maxRedirects: 0,
-        timeout: 15000,
-        validateStatus: (status) => status < 500,
-    });
-
-    // Caso 1: 302 com Location header (caminho feliz: pobreflixtv → mixdrop.top/e/FID)
-    const location = resp.headers?.location;
-    if (location) {
-        const url = location.startsWith('//') ? 'https:' + location : location;
-        if (getMixdropFID(url)) return url;
-        // Location pode ser relativa ou outro redirect — tenta seguir mais um passo
-        const resp2 = await axios.get(url, {
-            headers: { ...mixdropHeaders, 'Referer': getplayUrl },
-            maxRedirects: 5,
-            timeout: 15000,
-            validateStatus: () => true,
-        });
-        const loc2 = resp2.headers?.location || resp2.request?.res?.responseUrl || '';
-        if (getMixdropFID(loc2)) return loc2;
-        if (typeof resp2.data === 'string') {
-            const fromHtml = extractMixdropUrl(resp2.data);
-            if (fromHtml) return fromHtml;
-        }
-    }
-
-    // Caso 2: respondeu HTML com link do mixdrop
-    if (typeof resp.data === 'string') {
-        const fromHtml = extractMixdropUrl(resp.data);
-        if (fromHtml) return fromHtml;
-    }
-
-    // Caso 3: JSON
-    if (resp.data?.url) return resp.data.url;
-    if (resp.data?.link) return resp.data.link;
-
-    throw new Error(`getplay.php nao retornou URL do mixdrop. Status: ${resp.status}. Resposta: ${String(resp.data).slice(0, 300)}`);
-};
-
-
-// Player HTML com <video> nativo (sem iframe, sem ads)
-// A URL do MP4 é servida via /v1/proxy?url=... para que o cookie
-// seja enviado server-side (o browser não consegue setar cookies cross-origin).
-const buildVideoPlayer = (mp4Url, title = '', proxyUrl = null) => {
-    const videoSrc = proxyUrl || mp4Url;
-    return `<!DOCTYPE html>
-<html lang="pt-BR">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>${title || 'Player'}</title>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        html, body { width: 100%; height: 100%; background: #000; overflow: hidden; }
-        video { width: 100%; height: 100%; display: block; background: #000; }
-        #err { display:none; position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);
-               color:#fff; font-family:sans-serif; text-align:center; font-size:14px; }
-    </style>
-</head>
-<body>
-    <video id="v" controls autoplay playsinline preload="metadata"></video>
-    <div id="err">Erro ao carregar vídeo.<br><small id="errmsg"></small></div>
-    <script>
-        const v = document.getElementById('v');
-        const err = document.getElementById('err');
-        const errmsg = document.getElementById('errmsg');
-        const src = ${JSON.stringify(videoSrc)};
-
-        v.src = src;
-        v.onerror = function() {
-            err.style.display = 'block';
-            errmsg.textContent = 'Código: ' + (v.error ? v.error.code : '?');
-        };
-        v.play().catch(()=>{});
-    </script>
-</body>
-</html>`;
-};
-
-// Fallback: serve o getplay.php direto se o resolver falhar
-const fallbackEmbed = (videoId, sv) => {
-    const getplayUrl = `${BASE_URL}/e/getplay.php?id=${videoId}&sv=${sv}&token=${TOKEN}`;
-    return `<!DOCTYPE html>
-<html lang="pt-BR">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Player</title>
-    <style>
-        html, body { margin: 0; padding: 0; width: 100%; height: 100%; background: #000; overflow: hidden; }
-        iframe { width: 100%; height: 100%; border: none; display: block; }
-    </style>
-</head>
-<body>
-    <iframe src="${getplayUrl}" allowfullscreen scrolling="no"
-        allow="autoplay; encrypted-media; fullscreen; picture-in-picture"
-        referrerpolicy="origin"></iframe>
-</body>
-</html>`;
-};
-
-// --- PROXY DE VÍDEO ---
-// Faz o streaming do MP4 server-side com os headers/cookie corretos.
-// Isso é necessário porque o browser não consegue enviar cookies cross-origin
-// para o CDN do mixdrop diretamente no <video src="...">.
-app.get('/v1/proxy', async (req, res) => {
-    const { url, cookies, referer } = req.query;
-    if (!url) return res.status(400).send('URL obrigatória');
-
-    try {
-        const proxyHeaders = {
-            ...mixdropHeaders,
-            'Referer': referer || 'https://mixdrop.top/',
-            'Origin': 'https://mixdrop.top',
-            'Accept': '*/*',
-        };
-        if (cookies) proxyHeaders['Cookie'] = cookies;
-
-        // Suporte a Range requests (seek no player)
-        if (req.headers.range) proxyHeaders['Range'] = req.headers.range;
-
-        const upstream = await axios.get(url, {
-            headers: proxyHeaders,
-            responseType: 'stream',
-            timeout: 30000,
-            validateStatus: () => true,
-        });
-
-        // Repassa status e headers relevantes
-        res.status(upstream.status);
-        const passthrough = ['content-type','content-length','content-range','accept-ranges','cache-control'];
-        passthrough.forEach(h => {
-            if (upstream.headers[h]) res.setHeader(h, upstream.headers[h]);
-        });
-        // Garante que o browser aceite como vídeo
-        if (!upstream.headers['content-type'] || !upstream.headers['content-type'].includes('video')) {
-            res.setHeader('Content-Type', 'video/mp4');
-        }
-        res.setHeader('Access-Control-Allow-Origin', '*');
-
-        upstream.data.pipe(res);
-    } catch (err) {
-        console.error('[proxy] erro:', err.message);
-        res.status(502).send('Erro no proxy: ' + err.message);
-    }
-});
-
-// --- ROTA DE ASSISTIR ---
 app.get('/v1/watch/:id', async (req, res) => {
     const { id } = req.params;
     const sv = req.query.sv || 'mixdrop';
+    const asJson = req.query.json === '1';
 
-    if (!id) return res.send("ID Inválido");
+    if (!id) return res.status(400).json({ error: "ID inválido" });
 
     try {
-        // 1. Segue getplay.php → pega URL do mixdrop
-        console.log(`[watch] id=${id} sv=${sv}`);
+        // 1. getplay.php → URL do mixdrop
         const playerUrl = await followGetplay(id, sv);
-        console.log(`[watch] playerUrl=${playerUrl}`);
-
         const fid = getMixdropFID(playerUrl);
-        const domain = getMixdropDomain(playerUrl);
-        console.log(`[watch] fid=${fid} domain=${domain}`);
-
         if (!fid) throw new Error('FID não encontrado: ' + playerUrl);
 
-        // 2. Resolve MP4 direto via unpack JS + cookie de sessão
-        const { directUrl, title, cookies } = await resolveMixdrop(fid, domain);
-        console.log(`[watch] directUrl=${directUrl}`);
+        // 2. Resolve MP4 + cookies
+        const { directUrl, cookies, referer, title } = await resolveMixdrop(fid);
 
-        // 3. Monta URL do proxy com cookie e referer embutidos
+        // 3. Salva sessão para o proxy de stream
+        const sessionId = Math.random().toString(36).substring(2, 15);
+        videoSessions.set(sessionId, { mp4Url: directUrl, cookies, referer });
+
+        const streamUrl = `/api/stream/${sessionId}`;
         const host = `${req.protocol}://${req.get('host')}`;
-        const referer = `https://${domain}/`;
-        const proxyUrl = `${host}/v1/proxy?url=${encodeURIComponent(directUrl)}&referer=${encodeURIComponent(referer)}&cookies=${encodeURIComponent(cookies || '')}`;
 
-        // 4. Serve player nativo sem ads, usando o proxy
-        res.setHeader('Content-Type', 'text/html; charset=utf-8');
-        res.send(buildVideoPlayer(directUrl, title, proxyUrl));
+        // Retorna JSON com as informações ou redireciona pro stream
+        return res.json({
+            title,
+            fid,
+            streamUrl: host + streamUrl,
+            mp4Url: directUrl
+        });
 
     } catch (err) {
-        console.error('[watch] ERRO:', err.message);
-        res.setHeader('Content-Type', 'text/html; charset=utf-8');
-        // Mostra o erro na tela em vez de cair no fallback silencioso
-        res.send(`<!DOCTYPE html><html><body style="background:#000;color:#fff;font-family:sans-serif;padding:20px">
-            <h3>Erro ao resolver vídeo</h3>
-            <pre>${err.message}</pre>
-            <p style="color:#aaa;font-size:12px">ID: ${id} | SV: ${sv}</p>
-        </body></html>`);
+        console.error('[watch] Erro:', err.message);
+        return res.status(500).json({ error: "Erro ao resolver vídeo", detail: err.message });
     }
 });
 
-// Rota auxiliar: resolve video_id a partir da URL da página e abre o player
+// Rota auxiliar: resolve a partir da URL da página
 app.get('/v1/play', async (req, res) => {
     let { url, sv } = req.query;
     if (!url) return res.status(400).json({ error: "URL obrigatória" });
@@ -682,35 +448,72 @@ app.get('/v1/play', async (req, res) => {
     const server = sv || 'mixdrop';
 
     try {
-        // 1. Busca a página e extrai o video_id do C_Video(...)
         const response = await api.get(url);
         const videoId = extractVideoId(response.data);
         if (!videoId) return res.status(404).json({ error: "video_id não encontrado na página" });
 
-        // 2. Segue getplay.php → pega URL do mixdrop
         const playerUrl = await followGetplay(videoId, server);
         const fid = getMixdropFID(playerUrl);
-
         if (!fid) throw new Error('FID não encontrado: ' + playerUrl);
 
-        // 3. Resolve MP4 direto com cookie de sessão
-        const domain2 = getMixdropDomain(playerUrl);
-        const { directUrl, title, cookies } = await resolveMixdrop(fid, domain2);
+        const { directUrl, cookies, referer, title } = await resolveMixdrop(fid);
 
-        // 4. Monta URL do proxy
+        const sessionId = Math.random().toString(36).substring(2, 15);
+        videoSessions.set(sessionId, { mp4Url: directUrl, cookies, referer });
+
         const host = `${req.protocol}://${req.get('host')}`;
-        const referer2 = `https://${domain2}/`;
-        const proxyUrl = `${host}/v1/proxy?url=${encodeURIComponent(directUrl)}&referer=${encodeURIComponent(referer2)}&cookies=${encodeURIComponent(cookies || '')}`;
-
-        // 5. Serve player nativo
-        res.setHeader('Content-Type', 'text/html; charset=utf-8');
-        res.send(buildVideoPlayer(directUrl, title, proxyUrl));
+        return res.json({
+            title,
+            fid,
+            streamUrl: host + `/api/stream/${sessionId}`,
+            mp4Url: directUrl
+        });
 
     } catch (err) {
-        console.error('[play] Erro ao resolver:', err.message);
+        console.error('[play] Erro:', err.message);
         res.status(500).json({ error: "Erro ao resolver link do vídeo", detail: err.message });
     }
 });
+
+// --- PROXY DE STREAM: injeta cookies e faz pipe do CDN ---
+
+app.get('/api/stream/:sessionId', async (req, res) => {
+    const sessionData = videoSessions.get(req.params.sessionId);
+    if (!sessionData) return res.status(404).send('Sessão expirada ou inválida');
+
+    const { mp4Url, cookies, referer } = sessionData;
+
+    try {
+        const streamHeaders = {
+            'User-Agent': mixdropHeaders['User-Agent'],
+            'Referer': referer,
+            'Origin': referer,
+            'Cookie': cookies,
+            'Accept': '*/*'
+        };
+
+        if (req.headers.range) {
+            streamHeaders.Range = req.headers.range;
+        }
+
+        const cdnResp = await axios({
+            method: 'get',
+            url: mp4Url,
+            headers: streamHeaders,
+            responseType: 'stream',
+            timeout: 30000
+        });
+
+        res.writeHead(cdnResp.status, cdnResp.headers);
+        cdnResp.data.pipe(res);
+
+    } catch (error) {
+        console.error('[stream] Erro no proxy:', error.message);
+        res.status(500).send('Erro ao buscar vídeo no CDN');
+    }
+});
+
+// --- START ---
 
 if (require.main === module) {
     app.listen(PORT, () => {
