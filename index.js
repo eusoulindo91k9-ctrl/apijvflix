@@ -93,16 +93,29 @@ const cleanText = (text) => text ? text.replace(/\n/g, '').trim() : '';
 
 const extractVideoId = (html) => {
     // 1. onclick="C_Video('ID','mixdrop')" em qualquer elemento HTML
-    const onclickMatch = html.match(/onclick=["']C_Video\(['"]([\w\d]+)['"]\s*,\s*['"]mixdrop['"]\)/i);
+    const onclickMatch = html.match(/onclick=["']C_Video\(['"](\w+)['"]\s*,\s*['"]mixdrop['"]\)/i);
     if (onclickMatch) return onclickMatch[1];
 
     // 2. C_Video('ID','mixdrop') em qualquer lugar (scripts, inline JS, etc.)
-    const genericMatch = html.match(/C_Video\(['"]([\w\d]+)['"]\s*,\s*['"]mixdrop['"]\)/i);
+    const genericMatch = html.match(/C_Video\(['"](\w+)['"]\s*,\s*['"]mixdrop['"]\)/i);
     if (genericMatch) return genericMatch[1];
 
-    // 3. id="mixdrop" com data-id contendo o ID
-    const dataIdMatch = html.match(/id=["']mixdrop["'][^>]*data-id=["']([\w\d]+)["']/i)
-        || html.match(/data-id=["']([\w\d]+)["'][^>]*id=["']mixdrop["']/i);
+    // 3. C_Video('ID', qualquer servidor) — pega o ID independente do servidor
+    const anyServerMatch = html.match(/C_Video\(['"](\w+)['"]\s*,\s*['"][^'"]+['"]\)/i);
+    if (anyServerMatch) return anyServerMatch[1];
+
+    // 4. sv=mixdrop&id=ID ou id=ID&...token= em links redirect/getplay/getembed
+    const svMixdropMatch = html.match(/sv=mixdrop&(?:amp;)?id=(\w+)/i)
+        || html.match(/[?&]id=(\w+)&(?:amp;)?(?:sv|token)=/i);
+    if (svMixdropMatch) return svMixdropMatch[1];
+
+    // 5. data-pageID no body (fallback da página toda)
+    const pageIdMatch = html.match(/data-pageID=['"]?(\d+)['"]?/i);
+    if (pageIdMatch) return pageIdMatch[1];
+
+    // 6. id="mixdrop" com data-id contendo o ID
+    const dataIdMatch = html.match(/id=["']mixdrop["'][^>]*data-id=["'](\w+)["']/i)
+        || html.match(/data-id=["'](\w+)["'][^>]*id=["']mixdrop["']/i);
     if (dataIdMatch) return dataIdMatch[1];
 
     return null;
