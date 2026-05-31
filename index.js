@@ -279,7 +279,9 @@ app.get('/', (req, res) => {
             search: "/v1/search?s=nome",
             info: "/v1/info?url=link_completo",
             watch: "/v1/watch/:id",
-            stream: "/api/stream/:sessionId"
+            stream: "/api/stream/:sessionId",
+            getlives: "/v1/getlives",
+            watchlive: "/v1/watchlive?url=url_do_embed"
         }
     });
 });
@@ -515,6 +517,130 @@ app.get('/api/stream/:sessionId', async (req, res) => {
     }
 });
 
+// --- LIVES: busca eventos ao vivo do reidoscanais ---
+
+const LIVES_API_URL = 'https://api.reidoscanais.ooo/sports?status=live';
+const LIVES_HEADERS = {
+    'accept': 'application/json, text/plain, */*',
+    'accept-language': 'pt-BR',
+    'origin': 'https://reidoscanais.ooo',
+    'priority': 'u=1, i',
+    'referer': 'https://reidoscanais.ooo/',
+    'sec-ch-ua': '"Chromium";v="127", "Not)A;Brand";v="99", "Microsoft Edge Simulate";v="127", "Lemur";v="127"',
+    'sec-ch-ua-mobile': '?1',
+    'sec-ch-ua-platform': '"Android"',
+    'sec-fetch-dest': 'empty',
+    'sec-fetch-mode': 'cors',
+    'sec-fetch-site': 'same-site',
+    'user-agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Mobile Safari/537.36'
+};
+
+app.get('/v1/getlives', async (req, res) => {
+    try {
+        const response = await axios.get(LIVES_API_URL, {
+            headers: LIVES_HEADERS,
+            timeout: 15000
+        });
+
+        const data = response.data;
+
+        if (!data || !data.success) {
+            return res.status(502).json({ success: false, error: 'Resposta inválida da API de lives' });
+        }
+
+        // Injeta watchlive_url em cada embed para facilitar uso direto
+        const host = `${req.protocol}://${req.get('host')}`;
+        const enriched = (data.data || []).map(event => ({
+            ...event,
+            embeds: (event.embeds || []).map(embed => ({
+                ...embed,
+                watchlive_url: `${host}/v1/watchlive?url=${encodeURIComponent(embed.embed_url)}`
+            }))
+        }));
+
+        return res.json({
+            success: true,
+            data: enriched,
+            total: enriched.length
+        });
+
+    } catch (err) {
+        console.error('[getlives] Erro:', err.message);
+        return res.status(500).json({ success: false, error: 'Erro ao buscar lives', detail: err.message });
+    }
+});
+
+// --- WATCHLIVE: extrai src do iframe do esportesembed e serve como player proxy ---
+
+app.get('/v1/watchlive', async (req, res) => {
+    const { url } = req.query;
+    if (!url) return res.status(400).json({ error: "Parâmetro 'url' obrigatório" });
+
+    try {
+        // Busca o HTML da página do esportesembed
+        const pageResp = await axios.get(url, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Mobile Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'pt-BR,pt;q=0.9',
+                'Referer': 'https://reidoscanais.ooo/'
+            },
+            timeout: 15000
+        });
+
+        const $ = cheerio.load(pageResp.data);
+
+        // Pega o src do primeiro iframe do body
+        const iframeSrc = $('body iframe').first().attr('src');
+
+        if (!iframeSrc) {
+            return res.status(404).json({ error: 'Nenhum iframe encontrado na página do embed' });
+        }
+
+        // Resolve URL relativa se necessário
+        const resolvedSrc = iframeSrc.startsWith('http')
+            ? iframeSrc
+            : iframeSrc.startsWith('//')
+                ? 'https:' + iframeSrc
+                : new URL(iframeSrc, url).href;
+
+        // Retorna uma página HTML com o iframe direto, sem ads do esportesembed
+        const html = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Player</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { width: 100%; height: 100%; background: #000; overflow: hidden; }
+    iframe {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      border: none;
+    }
+  </style>
+</head>
+<body>
+  <iframe
+    src="${resolvedSrc}"
+    allow="autoplay; encrypted-media; fullscreen; picture-in-picture"
+    allowfullscreen
+    frameborder="0"
+  ></iframe>
+</body>
+</html>`;
+
+        res.setHeader('Content-Type', 'text/html; charset=utf-8');
+        return res.send(html);
+
+    } catch (err) {
+        console.error('[watchlive] Erro:', err.message);
+        return res.status(500).json({ error: 'Erro ao processar embed', detail: err.message });
+    }
+});
+
 // --- START ---
 
 if (require.main === module) {
@@ -524,4 +650,3 @@ if (require.main === module) {
 }
 
 module.exports = app;
-
