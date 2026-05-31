@@ -604,7 +604,9 @@ app.get('/v1/watchlive', async (req, res) => {
                 ? 'https:' + iframeSrc
                 : new URL(iframeSrc, url).href;
 
-        // Retorna uma página HTML com o iframe direto, sem ads do esportesembed
+        // Usa o proxy de iframe com origin/referer reidoscanais.ooo
+        const proxyUrl = `${req.protocol}://${req.get('host')}/api/live-proxy?url=${encodeURIComponent(resolvedSrc)}`;
+
         const html = `<!DOCTYPE html>
 <html>
 <head>
@@ -624,7 +626,7 @@ app.get('/v1/watchlive', async (req, res) => {
 </head>
 <body>
   <iframe
-    src="${resolvedSrc}"
+    src="${proxyUrl}"
     allow="autoplay; encrypted-media; fullscreen; picture-in-picture"
     allowfullscreen
     frameborder="0"
@@ -638,6 +640,53 @@ app.get('/v1/watchlive', async (req, res) => {
     } catch (err) {
         console.error('[watchlive] Erro:', err.message);
         return res.status(500).json({ error: 'Erro ao processar embed', detail: err.message });
+    }
+});
+
+// --- PROXY DE IFRAME: injeta origin e referer reidoscanais.ooo ---
+
+app.get('/api/live-proxy', async (req, res) => {
+    const { url } = req.query;
+    if (!url) return res.status(400).send('Parâmetro url obrigatório');
+
+    try {
+        const proxyHeaders = {
+            'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Mobile Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'pt-BR,pt;q=0.9',
+            'Origin': 'https://reidoscanais.ooo',
+            'Referer': 'https://reidoscanais.ooo/',
+            'sec-ch-ua': '"Chromium";v="127", "Not)A;Brand";v="99", "Microsoft Edge Simulate";v="127", "Lemur";v="127"',
+            'sec-ch-ua-mobile': '?1',
+            'sec-ch-ua-platform': '"Android"',
+            'sec-fetch-dest': 'iframe',
+            'sec-fetch-mode': 'navigate',
+            'sec-fetch-site': 'cross-site'
+        };
+
+        const targetResp = await axios.get(url, {
+            headers: proxyHeaders,
+            timeout: 15000,
+            validateStatus: () => true,
+            maxRedirects: 5
+        });
+
+        // Repassa o content-type original
+        const contentType = targetResp.headers['content-type'] || 'text/html';
+        res.setHeader('Content-Type', contentType);
+
+        // Remove X-Frame-Options e CSP para permitir embed
+        res.removeHeader('X-Frame-Options');
+        res.setHeader(
+            'Content-Security-Policy',
+            "default-src * 'unsafe-inline' 'unsafe-eval' data: blob:; frame-src *; child-src *; connect-src *; script-src * 'unsafe-inline' 'unsafe-eval'; media-src * data: blob:;"
+        );
+
+        return res.send(targetResp.data);
+
+    } catch (err) {
+        console.error('[live-proxy] Erro:', err.message);
+        return res.status(500).send('Erro ao buscar conteúdo do iframe');
     }
 });
 
