@@ -361,7 +361,14 @@ app.get('/v1/info', async (req, res) => {
         const year = $('.infos span').eq(1).text().trim();
         const imdb = $('.imdb').text().trim();
 
-        const videoId = extractVideoId(response.data);
+        // Override de video_id por slug de URL específico
+        const VIDEO_ID_OVERRIDES = {
+            'assistir-todo-mundo-em-panico-dublado-2026-70869': '71119',
+        };
+        const urlSlug = url.split('/').filter(Boolean).pop();
+        const overriddenVideoId = VIDEO_ID_OVERRIDES[urlSlug] || null;
+
+        const videoId = overriddenVideoId || extractVideoId(response.data);
         const pageId = extractId(url);
 
         const result = {
