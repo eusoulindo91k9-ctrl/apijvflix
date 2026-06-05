@@ -430,7 +430,7 @@ app.get('/v1/watch/:id', async (req, res) => {
         videoSessions.set(sessionId, { mp4Url: directUrl, cookies, referer });
 
         const streamUrl = `/api/stream/${sessionId}`;
-        const host = `https://apijvflix.vercel.app`;
+        const host = `https://apijvflix-1.onrender.com`;
 
         // Retorna JSON com as informações ou redireciona pro stream
         return res.json({
