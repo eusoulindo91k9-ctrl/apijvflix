@@ -18,8 +18,8 @@ app.use((req, res, next) => {
     next();
 });
 
-const BASE_URL = 'https://www.pobreflixtv.autos';
-const TOKEN = '0d3aea9faaa5feda8141';
+const BASE_URL = 'https://www.pobreflixtv.garden';
+const TOKEN = '807ed23d9158c4482fc6';
 
 const api = axios.create({
     baseURL: BASE_URL,
@@ -58,6 +58,71 @@ const extractVideoId = (html) => {
     // Fallback: primeiro C_Video encontrado no HTML
     const match = html.match(/C_Video\(['"](\d+)['"]/);
     return match ? match[1] : null;
+};
+
+/**
+ * Faz GET seguindo redirects (igual curl -L), retornando { html, finalUrl }.
+ * Preserva cookies e referer em cada hop — necessário para sites que
+ * redirecionam entre domínios antes de entregar a página com o video_id.
+ */
+const fetchFollowingRedirects = async (startUrl, { maxRedirects = 10 } = {}) => {
+    const BROWSER_HEADERS = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
+    };
+
+    let currentUrl = startUrl;
+    let cookieJar = {};   // acumula cookies entre hops
+    let hops = 0;
+
+    while (hops < maxRedirects) {
+        hops++;
+
+        const cookieHeader = Object.entries(cookieJar)
+            .map(([k, v]) => `${k}=${v}`)
+            .join('; ');
+
+        const resp = await axios.get(currentUrl, {
+            headers: {
+                ...BROWSER_HEADERS,
+                'Referer': currentUrl,
+                ...(cookieHeader ? { Cookie: cookieHeader } : {}),
+            },
+            maxRedirects: 0,                 // manuseia redirect manualmente
+            validateStatus: (s) => s < 500, // não lança em 3xx
+            timeout: 15000,
+        });
+
+        // Coleta Set-Cookie de cada hop
+        const setCookie = resp.headers['set-cookie'];
+        if (setCookie) {
+            for (const cookie of (Array.isArray(setCookie) ? setCookie : [setCookie])) {
+                const [pair] = cookie.split(';');
+                const eqIdx = pair.indexOf('=');
+                if (eqIdx > 0) {
+                    cookieJar[pair.slice(0, eqIdx).trim()] = pair.slice(eqIdx + 1).trim();
+                }
+            }
+        }
+
+        const status = resp.status;
+        const location = resp.headers['location'];
+
+        // Redirect? Resolve URL relativa e continua
+        if (status >= 300 && status < 400 && location) {
+            const resolved = new URL(location, currentUrl).href;
+            console.log(`[fetchFollowingRedirects] ${status} ${currentUrl} → ${resolved}`);
+            currentUrl = resolved;
+            continue;
+        }
+
+        // Chegou na resposta final
+        console.log(`[fetchFollowingRedirects] ${status} ${currentUrl} (${hops} hop(s))`);
+        return { html: resp.data, finalUrl: currentUrl };
+    }
+
+    throw new Error(`[fetchFollowingRedirects] Limite de ${maxRedirects} redirects atingido em: ${currentUrl}`);
 };
 
 const parseCard = ($, element) => {
@@ -348,8 +413,11 @@ app.get('/v1/info', async (req, res) => {
     try {
         if (!url.includes('area=online')) url = url.includes('?') ? `${url}&area=online` : `${url}?area=online`;
         if (season) url = url.includes('?') ? `${url}&temporada=${season}` : `${url}?temporada=${season}`;
-        const response = await api.get(url);
-        const $ = cheerio.load(response.data);
+
+        // Segue redirects manualmente (igual curl -L) para garantir que chegamos
+        // na URL final mesmo que o site redirecione entre domínios
+        const { html: pageHtml, finalUrl } = await fetchFollowingRedirects(url);
+        const $ = cheerio.load(pageHtml);
 
         const listagem = $('#listagem');
         const breadcrumb = $('.breadcrumb').text();
@@ -361,15 +429,18 @@ app.get('/v1/info', async (req, res) => {
         const year = $('.infos span').eq(1).text().trim();
         const imdb = $('.imdb').text().trim();
 
-        // Override de video_id por slug de URL específico
+        // Override de video_id por slug — usa URL FINAL (após redirects) como fonte do slug
         const VIDEO_ID_OVERRIDES = {
             'assistir-todo-mundo-em-panico-dublado-2026-70869': '71119',
         };
-        const urlSlug = url.split('/').filter(Boolean).pop();
+
+        // Slug e pageId vindos da URL final (após todos os redirects)
+        const finalPath = new URL(finalUrl).pathname;
+        const urlSlug = finalPath.split('/').filter(Boolean).pop();
         const overriddenVideoId = VIDEO_ID_OVERRIDES[urlSlug] || null;
 
-        const videoId = overriddenVideoId || extractVideoId(response.data);
-        const pageId = extractId(url);
+        const videoId = overriddenVideoId || extractVideoId(pageHtml);
+        const pageId = extractId(finalPath);
 
         const result = {
             id: pageId,
@@ -463,8 +534,8 @@ app.get('/v1/play', async (req, res) => {
 
     try {
         if (!url.includes('area=online')) url = url.includes('?') ? `${url}&area=online` : `${url}?area=online`;
-        const response = await api.get(url);
-        const videoId = extractVideoId(response.data);
+        const { html: pageHtml } = await fetchFollowingRedirects(url);
+        const videoId = extractVideoId(pageHtml);
         if (!videoId) return res.status(404).json({ error: "video_id não encontrado na página" });
 
         const playerUrl = await followGetplay(videoId, server);
