@@ -18,8 +18,8 @@ app.use((req, res, next) => {
     next();
 });
 
-const BASE_URL = 'https://www.pobreflixtv.garden';
-const TOKEN = '807ed23d9158c4482fc6';
+const BASE_URL = 'https://www.pobreflixtv.autos';
+const TOKEN = '0d3aea9faaa5feda8141';
 
 const api = axios.create({
     baseURL: BASE_URL,
@@ -456,23 +456,70 @@ app.get('/v1/info', async (req, res) => {
         };
 
         if (isSeries) {
-            const episodes = [];
-            $('#listagem li').each((index, element) => {
-                const linkTag = $(element).find('a').first();
-                const epUrl = linkTag.attr('href');
-                const epName = linkTag.text().trim();
-                const sortId = parseInt($(element).attr('data-id')) || index;
+            // Detecta quantas temporadas existem pelo script inline
+            // Padrão: "<ul class='lista'>...<li onclick='load(N);'>..." — o maior N é o total
+            const seasonsMatch = pageHtml.match(/onclick='load\((\d+)\)'/g);
+            const totalSeasons = seasonsMatch
+                ? Math.max(...seasonsMatch.map(m => parseInt(m.match(/\d+/)[0])))
+                : 1;
 
-                if (epUrl) {
-                    episodes.push({
-                        name: epName,
-                        player_id: extractId(epUrl),
-                        url: epUrl,
-                        order: sortId
-                    });
-                }
-            });
-            result.episodes = episodes.sort((a, b) => a.order - b.order);
+            // Detecta qual temporada está atualmente carregada pelo botão dropdown
+            const currentSeasonMatch = pageHtml.match(/<button[^>]*dropdown-toggle[^>]*>Temporada\s*(\d+)<\/button>/);
+            const currentSeason = currentSeasonMatch ? parseInt(currentSeasonMatch[1]) : 1;
+
+            // Helper para extrair episódios do HTML de uma temporada
+            const extractEpisodes = (html, seasonNum) => {
+                const $$ = cheerio.load(html);
+                const eps = [];
+                $$('#listagem li').each((index, element) => {
+                    const linkTag = $$(element).find('a').first();
+                    const epUrl = linkTag.attr('href');
+                    const epName = linkTag.text().trim();
+                    const sortId = parseInt($$(element).attr('data-id')) || index;
+                    if (epUrl) {
+                        eps.push({
+                            name: epName,
+                            season: seasonNum,
+                            player_id: extractId(epUrl),
+                            url: epUrl,
+                            order: sortId
+                        });
+                    }
+                });
+                return eps.sort((a, b) => a.order - b.order);
+            };
+
+            // Temporada atual já está no HTML que já buscamos
+            const episodesBySeason = {};
+            episodesBySeason[currentSeason] = extractEpisodes(pageHtml, currentSeason);
+
+            // Busca as demais temporadas em paralelo
+            if (totalSeasons > 1) {
+                const basePageUrl = finalUrl.split('?')[0];
+                const otherSeasons = Array.from({ length: totalSeasons }, (_, i) => i + 1)
+                    .filter(s => s !== currentSeason);
+
+                await Promise.all(otherSeasons.map(async (s) => {
+                    try {
+                        const seasonUrl = `${basePageUrl}?area=online&temporada=${s}`;
+                        const { html: sHtml } = await fetchFollowingRedirects(seasonUrl);
+                        episodesBySeason[s] = extractEpisodes(sHtml, s);
+                    } catch (e) {
+                        console.error(`[info] Erro ao buscar temporada ${s}:`, e.message);
+                        episodesBySeason[s] = [];
+                    }
+                }));
+            }
+
+            // Lista flat ordenada por temporada (compatibilidade)
+            const allEpisodes = Object.keys(episodesBySeason)
+                .map(Number)
+                .sort((a, b) => a - b)
+                .flatMap(s => episodesBySeason[s]);
+
+            result.total_seasons = totalSeasons;
+            result.episodes = allEpisodes;
+            result.episodes_by_season = episodesBySeason;
         } else {
             const watchId = videoId || pageId;
             result.watch_link = `${req.protocol}://${req.get('host')}/v1/watch/${watchId}`;
