@@ -18,8 +18,15 @@ app.use((req, res, next) => {
     next();
 });
 
-const BASE_URL = 'https://www.pobreflixtv.autos';
-const TOKEN = '0d3aea9faaa5feda8141';
+// === NOVO DOMÍNIO DO POBREFLIX (atualizado em 2026) ===
+// Site original: https://www.pobreflixtv.gift/
+// A API antiga usava pobreflixtv.autos + token fixo + endpoint /e/getplay.php.
+// O novo site é IPS (Invision) e usa endpoints index.php?app=videobox&...
+// Não há mais token nem sv=mixdrop — o playerData retorna TODOS os servers.
+const BASE_URL = 'https://www.pobreflixtv.gift';
+const PLAYER_DATA_ENDPOINT = '/index.php?app=videobox&module=video&controller=view&do=playerData&id=';
+const EPISODES_LIST_ENDPOINT = '/index.php?app=videobox&module=video&controller=view&do=episodesList';
+const SEARCH_ENDPOINT = '/index.php?app=videobox&module=video&controller=index&do=buscarContent';
 
 const api = axios.create({
     baseURL: BASE_URL,
@@ -27,7 +34,7 @@ const api = axios.create({
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
         'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
-        'Referer': 'https://www.pobreflixtv.autos/'
+        'Referer': BASE_URL + '/'
     },
     timeout: 15000
 });
@@ -45,25 +52,42 @@ const videoSessions = new Map();
 
 const extractId = (url) => {
     if (!url) return null;
+    // Padrão: ...-slug-12345/  (qualquer URL de filme/série/episódio do pobreflix termina com -<id>/)
     const matches = url.match(/-(\d+)\/?$/);
     return matches ? matches[1] : null;
 };
 
-const cleanText = (text) => text ? text.replace(/\n/g, '').trim() : '';
+const cleanText = (text) => text ? text.replace(/\n/g, '').replace(/\s+/g, ' ').trim() : '';
 
+/**
+ * Extrai o video_id da página de detalhes.
+ * No novo site, o ID é exposto diretamente como <div id="view" data-video-id="12345">.
+ * Mantemos um fallback para o padrão antigo C_Video('12345') por segurança.
+ */
 const extractVideoId = (html) => {
-    // Tenta pegar o ID do Dublado: procura dentro da função NewAudio()
+    // 1. Padrão novo (filmes): <div id="view" data-video-id="12345" ...>
+    const viewDivMatch = html.match(/<div[^>]*id=["']view["'][^>]*data-video-id=["'](\d+)["']/i);
+    if (viewDivMatch) return viewDivMatch[1];
+
+    // 2. Padrão novo (séries): <section class="vbEpisodes" data-video-id="12345" ...>
+    const sectionMatch = html.match(/<section[^>]*class=["'][^"']*vbEpisodes[^"']*["'][^>]*data-video-id=["'](\d+)["']/i);
+    if (sectionMatch) return sectionMatch[1];
+    // Variante: data-video-id pode vir antes de class
+    const sectionMatch2 = html.match(/<section[^>]*data-video-id=["'](\d+)["'][^>]*class=["'][^"']*vbEpisodes[^"']*["']/i);
+    if (sectionMatch2) return sectionMatch2[1];
+
+    // 3. Padrão antigo: function NewAudio() ... C_Video('12345')
     const newAudioMatch = html.match(/function\s+NewAudio\s*\(\s*\)[\s\S]*?C_Video\s*\(\s*['"](\d+)['"]/);
     if (newAudioMatch) return newAudioMatch[1];
-    // Fallback: primeiro C_Video encontrado no HTML
+
+    // 4. Fallback: primeiro C_Video encontrado
     const match = html.match(/C_Video\(['"](\d+)['"]/);
     return match ? match[1] : null;
 };
 
 /**
  * Faz GET seguindo redirects (igual curl -L), retornando { html, finalUrl }.
- * Preserva cookies e referer em cada hop — necessário para sites que
- * redirecionam entre domínios antes de entregar a página com o video_id.
+ * Preserva cookies e referer em cada hop.
  */
 const fetchFollowingRedirects = async (startUrl, { maxRedirects = 10 } = {}) => {
     const BROWSER_HEADERS = {
@@ -73,7 +97,7 @@ const fetchFollowingRedirects = async (startUrl, { maxRedirects = 10 } = {}) => 
     };
 
     let currentUrl = startUrl;
-    let cookieJar = {};   // acumula cookies entre hops
+    let cookieJar = {};
     let hops = 0;
 
     while (hops < maxRedirects) {
@@ -89,12 +113,11 @@ const fetchFollowingRedirects = async (startUrl, { maxRedirects = 10 } = {}) => 
                 'Referer': currentUrl,
                 ...(cookieHeader ? { Cookie: cookieHeader } : {}),
             },
-            maxRedirects: 0,                 // manuseia redirect manualmente
-            validateStatus: (s) => s < 500, // não lança em 3xx
+            maxRedirects: 0,
+            validateStatus: (s) => s < 500,
             timeout: 15000,
         });
 
-        // Coleta Set-Cookie de cada hop
         const setCookie = resp.headers['set-cookie'];
         if (setCookie) {
             for (const cookie of (Array.isArray(setCookie) ? setCookie : [setCookie])) {
@@ -109,7 +132,6 @@ const fetchFollowingRedirects = async (startUrl, { maxRedirects = 10 } = {}) => 
         const status = resp.status;
         const location = resp.headers['location'];
 
-        // Redirect? Resolve URL relativa e continua
         if (status >= 300 && status < 400 && location) {
             const resolved = new URL(location, currentUrl).href;
             console.log(`[fetchFollowingRedirects] ${status} ${currentUrl} → ${resolved}`);
@@ -117,7 +139,6 @@ const fetchFollowingRedirects = async (startUrl, { maxRedirects = 10 } = {}) => 
             continue;
         }
 
-        // Chegou na resposta final
         console.log(`[fetchFollowingRedirects] ${status} ${currentUrl} (${hops} hop(s))`);
         return { html: resp.data, finalUrl: currentUrl };
     }
@@ -125,41 +146,69 @@ const fetchFollowingRedirects = async (startUrl, { maxRedirects = 10 } = {}) => 
     throw new Error(`[fetchFollowingRedirects] Limite de ${maxRedirects} redirects atingido em: ${currentUrl}`);
 };
 
+/**
+ * Parser de card no novo layout do Pobreflix.
+ * Estrutura típica:
+ *   <div class="swiper-slide vbTabSliderItem">
+ *     <a href="..." class="block" title="Assistir X">
+ *       <div class="blocktwo">
+ *         <img src="..." alt="...">
+ *         <div class="from-background/20" ...></div>
+ *         <div class="top"><div>HD</div><div>DUAL</div></div>
+ *         <div class="info"><h3>Title</h3><p>2026</p></div>
+ *       </div>
+ *     </a>
+ *   </div>
+ */
 const parseCard = ($, element) => {
     try {
-        const anchor = $(element).find('a');
+        // O elemento pode ser o próprio <a class="block"> ou um container que o contém.
+        const $el = $(element);
+        const isAnchor = $el.is('a.block');
+        const anchor = isAnchor ? $el : $el.find('a.block').first();
         let url = anchor.attr('href') || '';
         if (url && !url.startsWith('http')) url = BASE_URL + url;
 
-        const thumbContainer = $(element).find('.vb_image_container');
-        let thumb = thumbContainer.attr('data-background-src');
-        if (!thumb) {
-            const style = thumbContainer.attr('style');
-            if (style && style.includes('url(')) {
-                const match = style.match(/url\(['"]?(.*?)['"]?\)/);
-                if (match) thumb = match[1];
-            }
+        let title = cleanText(anchor.attr('title') || '');
+        if (!title) {
+            title = cleanText($el.find('.info h3').first().text());
         }
+        // Remove prefixo "Assistir " se presente
+        if (title.toLowerCase().startsWith('assistir ')) {
+            title = title.slice(9).trim();
+        }
+
+        let thumb = $el.find('.blocktwo img').attr('src') ||
+                    $el.find('img').first().attr('src') || '';
         if (thumb && !thumb.startsWith('http')) thumb = BASE_URL + thumb;
 
-        const title = cleanText($(element).find('.caption').clone().children().remove().end().text());
-        const year = cleanText($(element).find('.caption .y').text());
-        const quality = cleanText($(element).find('.capa-quali').text());
+        const year = cleanText($el.find('.info p').first().text());
+
+        // Qualidades: múltiplos <div> dentro de .top (ex: HD, DUAL, DUB, LEG)
+        const qualities = [];
+        $el.find('.top > div').each((_, el) => {
+            const q = cleanText($(el).text());
+            if (q) qualities.push(q);
+        });
+        const quality = qualities.join(' / ');
 
         return { id: extractId(url), title, url, thumb, year, quality };
-    } catch (e) { return null; }
+    } catch (e) {
+        return null;
+    }
 };
 
 // --- MIXDROP: extração de FID e URL ---
 
 const getMixdropFID = (url) => {
     if (!url) return null;
-    const m = url.match(/(?:mixdrop\.[a-z]+|mdy48tn97\.com|mdbekjwqa\.pw|mdfx9dc8n\.net|mdzsmutpcvykb\.net)\/(?:f|e)\/([a-z0-9]+)/i);
+    // Aceita todos os domínios conhecidos do Mixdrop (incluindo os novos miixdrop.net / miiiixdrop.net / mxdrop.sx)
+    const m = url.match(/(?:mixdrop\.[a-z]+|miixdrop\.[a-z]+|miiiixdrop\.[a-z]+|mxdrop\.[a-z]+|mdy48tn97\.com|mdbekjwqa\.pw|mdfx9dc8n\.net|mdzsmutpcvykb\.net)\/(?:f|e)\/([a-z0-9]+)/i);
     return m ? m[1] : null;
 };
 
 const extractMixdropUrl = (html) => {
-    const MD = '(?:mixdrop\\.[a-z]+|mdy48tn97\\.com|mdbekjwqa\\.pw|mdfx9dc8n\\.net|mdzsmutpcvykb\\.net)';
+    const MD = '(?:mixdrop\\.[a-z]+|miixdrop\\.[a-z]+|miiiixdrop\\.[a-z]+|mxdrop\\.[a-z]+|mdy48tn97\\.com|mdbekjwqa\\.pw|mdfx9dc8n\\.net|mdzsmutpcvykb\\.net)';
     const patterns = [
         new RegExp('<iframe[^>]+src=["\']((?:https?:)?//' + MD + '/(?:e|f)/[a-z0-9]+[^"\']*)', 'i'),
         new RegExp('(?:window\\.location|location\\.href)\\s*=\\s*["\']((?:https?:)?//' + MD + '/(?:e|f)/[a-z0-9]+[^"\']*)', 'i'),
@@ -173,48 +222,81 @@ const extractMixdropUrl = (html) => {
     return null;
 };
 
-// --- GETPLAY: segue getplay.php e retorna URL do mixdrop ---
+// --- NOVO: PLAYER DATA → extrai FID do Mixdrop ---
 
-const followGetplay = async (videoId, sv = 'mixdrop') => {
-    const getplayUrl = `${BASE_URL}/e/getplay.php?id=${videoId}&sv=${sv}&token=${TOKEN}`;
+/**
+ * Chama o endpoint playerData do novo Pobreflix e retorna:
+ *   { fid, mixdropUrl, audio, isEpisode, serversDub, serversLeg, navigation }
+ *
+ * O JSON retornado pelo site tem formato:
+ *   {
+ *     "players": [{"label":"MixDrop","url":"https://miixdrop.net/e/","downloadUrl":"..."}],
+ *     "servers_dub": "mixdrop=abc123&streamtape=...&byse=...",
+ *     "servers_leg": "mixdrop=def456&streamtape=...&byse=...",
+ *     "is_episode": "1" | "",
+ *     "current_audio": "Dublado" | "Legendado",
+ *     "navigation": {"prev":"","next":"","series":""}
+ *   }
+ *
+ * O FID do Mixdrop vem em servers_dub OU servers_leg (query-string com provider=fid).
+ */
+const fetchPlayerData = async (videoId) => {
+    const url = BASE_URL + PLAYER_DATA_ENDPOINT + encodeURIComponent(videoId);
 
-    const resp = await axios.get(getplayUrl, {
-        headers: { ...mixdropHeaders, 'Referer': `${BASE_URL}/` },
-        maxRedirects: 0,
+    const resp = await axios.get(url, {
+        headers: {
+            ...mixdropHeaders,
+            'Accept': 'application/json, text/javascript, */*; q=0.01',
+            'Referer': BASE_URL + '/',
+            'X-Requested-With': 'XMLHttpRequest',
+        },
         timeout: 15000,
-        validateStatus: (status) => status < 500,
+        validateStatus: (s) => s < 500,
     });
 
-    // Caso 1: 302 com Location header
-    const location = resp.headers?.location;
-    if (location) {
-        const url = location.startsWith('//') ? 'https:' + location : location;
-        if (getMixdropFID(url)) return url;
-        const resp2 = await axios.get(url, {
-            headers: { ...mixdropHeaders, 'Referer': getplayUrl },
-            maxRedirects: 5,
-            timeout: 15000,
-            validateStatus: () => true,
-        });
-        const loc2 = resp2.headers?.location || resp2.request?.res?.responseUrl || '';
-        if (getMixdropFID(loc2)) return loc2;
-        if (typeof resp2.data === 'string') {
-            const fromHtml = extractMixdropUrl(resp2.data);
-            if (fromHtml) return fromHtml;
+    if (resp.status !== 200 || typeof resp.data !== 'object') {
+        throw new Error(`playerData falhou (status ${resp.status}) para id=${videoId}`);
+    }
+
+    const data = resp.data;
+
+    // Decodifica &amp; → & caso o servidor retorne HTML-entities na query-string
+    const decodeEntities = (s) => (s || '').replace(/&amp;/g, '&');
+
+    const serversDubRaw = decodeEntities(data.servers_dub || '');
+    const serversLegRaw = decodeEntities(data.servers_leg || '');
+
+    // Tenta Dublado primeiro; se vazio, usa Legendado
+    const chosenRaw = serversDubRaw || serversLegRaw;
+    const audio = serversDubRaw ? 'Dublado' : (serversLegRaw ? 'Legendado' : (data.current_audio || ''));
+
+    // Parse da query-string "mixdrop=fid&streamtape=fid&byse=fid&doodstream=fid"
+    const servers = {};
+    if (chosenRaw) {
+        for (const pair of chosenRaw.split('&')) {
+            const [k, v] = pair.split('=');
+            if (k && v) servers[k] = v;
         }
     }
 
-    // Caso 2: HTML com link do mixdrop
-    if (typeof resp.data === 'string') {
-        const fromHtml = extractMixdropUrl(resp.data);
-        if (fromHtml) return fromHtml;
-    }
+    // Encontra o URL base do Mixdrop no array de players
+    const mixdropPlayer = (data.players || []).find(p => /mixdrop/i.test(p.label || '') || getMixdropFID(p.url + 'xxxxx'));
+    const mixdropBaseUrl = mixdropPlayer ? mixdropPlayer.url : 'https://miixdrop.net/e/';
 
-    // Caso 3: JSON
-    if (resp.data?.url) return resp.data.url;
-    if (resp.data?.link) return resp.data.link;
+    const fid = servers.mixdrop || null;
+    const mixdropUrl = fid ? (mixdropBaseUrl + fid) : null;
 
-    throw new Error(`getplay.php nao retornou URL do mixdrop. Status: ${resp.status}. Resposta: ${String(resp.data).slice(0, 300)}`);
+    return {
+        fid,
+        mixdropUrl,
+        audio,
+        isEpisode: data.is_episode === '1' || data.is_episode === 1,
+        servers,
+        serversDub: serversDubRaw,
+        serversLeg: serversLegRaw,
+        navigation: data.navigation || {},
+        raw: data,
+    };
 };
 
 // --- UNPACK (p,a,c,k,e,d) ---
@@ -269,13 +351,16 @@ const resolveMixdrop = async (fid) => {
     const json = apiResp.data;
 
     if (!json.success) throw new Error('Arquivo não encontrado no mixdrop');
-    const fileInfo = json.result[0];
+    const fileInfo = (json.result || [])[0];
+    if (!fileInfo) throw new Error('Arquivo não retornado pelo mixdrop');
     if (fileInfo.deleted) throw new Error('Arquivo deletado no mixdrop');
 
-    // 2. Acessa a página embed e pega cookies
+    // 2. Acessa a página embed e pega cookies.
+    //    mixdrop.top continua sendo o ponto de entrada estável — ele redireciona
+    //    para o domínio atual (miixdrop.net / miiiixdrop.net / mxdrop.sx etc.).
     const embedUrl = `https://mixdrop.top/e/${fid}`;
     const pageResp = await axios.get(embedUrl, {
-        headers: { ...mixdropHeaders, 'Referer': 'https://mixdrop.top/' },
+        headers: { ...mixdropHeaders, 'Referer': BASE_URL + '/' },
         timeout: 15000
     });
 
@@ -285,7 +370,7 @@ const resolveMixdrop = async (fid) => {
         cookieString = rawCookies.map(c => c.split(';')[0]).join('; ');
     }
 
-    let html = pageResp.data;
+    let html = typeof pageResp.data === 'string' ? pageResp.data : '';
 
     // 3. Tenta extrair MP4 por padrões diretos no JS
     let directUrl = null;
@@ -318,7 +403,7 @@ const resolveMixdrop = async (fid) => {
                 headers: { ...mixdropHeaders, 'Referer': embedUrl },
                 timeout: 15000
             });
-            html = continueResp.data;
+            html = typeof continueResp.data === 'string' ? continueResp.data : '';
             for (const pat of directPatterns) {
                 const m = html.match(pat);
                 if (m) { directUrl = m[1]; break; }
@@ -342,7 +427,7 @@ const resolveMixdrop = async (fid) => {
 app.get('/', (req, res) => {
     res.json({
         status: "Online",
-        msg: "API JVFlix",
+        msg: "API JVFlix (Pobreflix .gift)",
         endpoints: {
             home: "/v1/get/recommeds",
             search: "/v1/search?s=nome",
@@ -355,6 +440,13 @@ app.get('/', (req, res) => {
     });
 });
 
+/**
+ * Home — recomendações.
+ *
+ * O novo site tem 2 seções <section id="vbTabSlider" aria-label="Filmes|Séries">,
+ * cada uma com 3 painéis: releases_<widgetKey>_html, latest_<widgetKey>_html, mostviewed_<widgetKey>_html.
+ * Por compatibilidade mantemos releases/trending, onde trending = mostviewed.
+ */
 app.get('/v1/get/recommeds', async (req, res) => {
     try {
         const response = await api.get('/');
@@ -365,82 +457,174 @@ app.get('/v1/get/recommeds', async (req, res) => {
             series: { releases: [], trending: [] }
         };
 
-        const moviesContainer = $('.cWidgetContainer').eq(0);
-        moviesContainer.find('.vbPanel-container[class*="releases_"] #collview').each((i, el) => data.movies.releases.push(parseCard($, el)));
-        moviesContainer.find('.vbPanel-container[class*="trending_"] #collview').each((i, el) => data.movies.trending.push(parseCard($, el)));
+        // Encontra as duas seções vbTabSlider
+        const sections = $('section#vbTabSlider');
+        if (sections.length === 0) {
+            return res.status(502).json({ error: "Estrutura da home mudou — nenhum #vbTabSlider encontrado" });
+        }
 
-        const seriesContainer = $('.cWidgetContainer').eq(1);
-        seriesContainer.find('.vbPanel-container[class*="releases_"] #collview').each((i, el) => data.series.releases.push(parseCard($, el)));
-        seriesContainer.find('.vbPanel-container[class*="trending_"] #collview').each((i, el) => data.series.trending.push(parseCard($, el)));
+        const fillSection = ($section, target) => {
+            // O id do widget é a classe do section (ex: kw8a73lf1)
+            const widgetKey = ($section.attr('class') || '').split(' ').find(c => /^[a-z0-9]{8,}$/i.test(c));
+            if (!widgetKey) return;
 
-        const clean = (arr) => arr.filter(i => i && i.id);
-        data.movies.releases = clean(data.movies.releases);
-        data.movies.trending = clean(data.movies.trending);
-        data.series.releases = clean(data.series.releases);
-        data.series.trending = clean(data.series.trending);
+            // Painel de Lançamentos
+            $section.find(`.vbPanel-container.releases_${widgetKey}_html .swiper-slide`).each((i, el) => {
+                const card = parseCard($, el);
+                if (card && card.id) target.releases.push(card);
+            });
+            // Painel "trending": tentamos mostviewed (Mais Vistos) primeiro; se vier vazio
+            // (o site carrega esse painel via AJAX só quando o usuário clica na aba),
+            // caímos para latest (Recentes), que já vem renderizado no HTML.
+            $section.find(`.vbPanel-container.mostviewed_${widgetKey}_html .swiper-slide`).each((i, el) => {
+                const card = parseCard($, el);
+                if (card && card.id) target.trending.push(card);
+            });
+            if (target.trending.length === 0) {
+                $section.find(`.vbPanel-container.latest_${widgetKey}_html .swiper-slide`).each((i, el) => {
+                    const card = parseCard($, el);
+                    if (card && card.id) target.trending.push(card);
+                });
+            }
+        };
+
+        // Filmes = primeira seção (aria-label="Filmes"); Séries = segunda (aria-label="Séries")
+        sections.each((_, sec) => {
+            const $sec = $(sec);
+            const label = ($sec.attr('aria-label') || '').toLowerCase();
+            if (label.includes('filme')) fillSection($sec, data.movies);
+            else if (label.includes('série') || label.includes('serie')) fillSection($sec, data.series);
+        });
 
         res.json(data);
     } catch (error) {
-        res.status(500).json({ error: "Erro ao carregar home" });
+        console.error('[recommeds] Erro:', error.message);
+        res.status(500).json({ error: "Erro ao carregar home", detail: error.message });
     }
 });
 
+/**
+ * Search — busca via endpoint AJAX.
+ *
+ * URL: /index.php?app=videobox&module=video&controller=index&do=buscarContent&q=<query>
+ * Retorna: {"html": "<cards...>"}
+ */
 app.get('/v1/search', async (req, res) => {
     const query = req.query.s;
     if (!query) return res.status(400).json({ error: "Parâmetro 's' obrigatório" });
 
     try {
-        const response = await api.get(`/pesquisar/?p=${encodeURIComponent(query)}`);
-        const $ = cheerio.load(response.data);
-        const results = [];
-
-        $('#collview').each((i, el) => {
-            const item = parseCard($, el);
-            if (item && item.id) results.push(item);
+        const url = BASE_URL + SEARCH_ENDPOINT + '&q=' + encodeURIComponent(query);
+        const resp = await axios.get(url, {
+            headers: {
+                ...mixdropHeaders,
+                'Accept': 'application/json, text/javascript, */*; q=0.01',
+                'Referer': BASE_URL + '/buscar',
+                'X-Requested-With': 'XMLHttpRequest',
+            },
+            timeout: 15000,
+            validateStatus: (s) => s < 500,
         });
 
-        res.json({ results });
+        // O endpoint pode retornar JSON {html:"..."} ou diretamente HTML
+        let html = '';
+        if (resp.status === 200) {
+            if (typeof resp.data === 'string') {
+                html = resp.data;
+            } else if (resp.data && typeof resp.data === 'object' && resp.data.html) {
+                html = resp.data.html;
+            }
+        }
+
+        if (!html) {
+            return res.status(502).json({ error: "Resposta de busca vazia" });
+        }
+
+        const $ = cheerio.load(html);
+        const results = [];
+
+        // No resultado da busca os cards vêm como <a class="block"> soltos
+        // (sem wrapper .swiper-slide). parseCard já procura por a.block internamente,
+        // então passamos o próprio <a> como container.
+        $('a.block').each((i, el) => {
+            const card = parseCard($, el);
+            if (card && card.id) results.push(card);
+        });
+
+        // Dedup por id (às vezes o mesmo filme aparece duas vezes)
+        const seen = new Set();
+        const deduped = results.filter(r => {
+            if (seen.has(r.id)) return false;
+            seen.add(r.id);
+            return true;
+        });
+
+        res.json({ results: deduped, total: deduped.length });
     } catch (error) {
-        res.status(500).json({ error: "Erro na busca" });
+        console.error('[search] Erro:', error.message);
+        res.status(500).json({ error: "Erro na busca", detail: error.message });
     }
 });
 
+/**
+ * Info — detalhes de filme/série/episódio.
+ *
+ * IMPORTANTE: o novo site retorna 403 se a URL tiver ?area=online.
+ * Não usamos mais esse parâmetro — a página em si já contém o data-video-id.
+ */
 app.get('/v1/info', async (req, res) => {
     let { url, season } = req.query;
     if (!url) return res.status(400).json({ error: "URL obrigatória" });
     if (!url.startsWith('http')) url = BASE_URL + url;
 
-    try {
-        if (!url.includes('area=online')) url = url.includes('?') ? `${url}&area=online` : `${url}?area=online`;
-        if (season) url = url.includes('?') ? `${url}&temporada=${season}` : `${url}?temporada=${season}`;
+    // NOVO: NÃO adicionar ?area=online (causa 403 no novo domínio)
+    // Removemos qualquer ?area=online que vier na URL do cliente
+    const parsedUrl = new URL(url);
+    parsedUrl.searchParams.delete('area');
+    if (season) parsedUrl.searchParams.set('temporada', season);
+    url = parsedUrl.href;
 
-        // Segue redirects manualmente (igual curl -L) para garantir que chegamos
-        // na URL final mesmo que o site redirecione entre domínios
+    try {
         const { html: pageHtml, finalUrl } = await fetchFollowingRedirects(url);
         const $ = cheerio.load(pageHtml);
 
-        const listagem = $('#listagem');
-        const breadcrumb = $('.breadcrumb').text();
-        const isSeries = listagem.length > 0 || breadcrumb.includes('Séries') || breadcrumb.includes('Series');
+        // Detecção de série: presença de <section class="vbEpisodes"> OU URL com /series/online/
+        const vbEpisodesSection = $('.vbEpisodes');
+        const isSeries = vbEpisodesSection.length > 0 || finalUrl.includes('/series/online/');
 
-        const title = $('.titulo').text().trim();
-        const thumb = $('.vb_image_container').attr('data-background-src');
-        const desc = $('.sinopse').text().replace('Ler mais...', '').trim();
-        const year = $('.infos span').eq(1).text().trim();
-        const imdb = $('.imdb').text().trim();
+        // Título: <h2 class="one"> é o título limpo; <h1 class="type"> é "Assistir X Online"
+        const titleH2 = cleanText($('.one').first().text());
+        const titleH1 = cleanText($('.type').first().text());
+        const title = titleH2 || titleH1.replace(/^Assistir\s+/i, '').replace(/\s+Online$/i, '').trim();
 
-        // Override de video_id por slug — usa URL FINAL (após redirects) como fonte do slug
-        const VIDEO_ID_OVERRIDES = {
-            'assistir-todo-mundo-em-panico-dublado-2026-70869': '71119',
-        };
+        // Thumb: .vbItemImage img (novo layout)
+        let thumb = $('.vbItemImage img').attr('src') || '';
+        if (!thumb) {
+            // Fallback antigo
+            thumb = $('.vb_image_container').attr('data-background-src') || '';
+        }
+        if (thumb && !thumb.startsWith('http')) thumb = BASE_URL + thumb;
 
-        // Slug e pageId vindos da URL final (após todos os redirects)
-        const finalPath = new URL(finalUrl).pathname;
-        const urlSlug = finalPath.split('/').filter(Boolean).pop();
-        const overriddenVideoId = VIDEO_ID_OVERRIDES[urlSlug] || null;
+        // Sinopse: .sinopse-text
+        const desc = cleanText($('.sinopse-text').first().text()) ||
+                     cleanText($('.sinopse').text().replace('Ler mais...', ''));
 
-        const videoId = overriddenVideoId || extractVideoId(pageHtml);
-        const pageId = extractId(finalPath);
+        // Ano / duração / nota: vêm no <span class="meta-info"> como "7.6 • 2026 • 1h, 53min"
+        const metaInfoText = cleanText($('.meta-info').first().text());
+        let year = '';
+        let imdb = cleanText($('.nota').first().text()); // na verdade é nota TMDB
+        if (metaInfoText) {
+            const yearMatch = metaInfoText.match(/\b(19|20)\d{2}\b/);
+            if (yearMatch) year = yearMatch[0];
+        }
+        // Fallback: classe .infos span[1] (antigo layout)
+        if (!year) {
+            year = cleanText($('.infos span').eq(1).text());
+        }
+
+        // Video ID: <div id="view" data-video-id="...">
+        const videoId = extractVideoId(pageHtml);
+        const pageId = extractId(finalUrl);
 
         const result = {
             id: pageId,
@@ -456,57 +640,116 @@ app.get('/v1/info', async (req, res) => {
         };
 
         if (isSeries) {
-            // Detecta quantas temporadas existem pelo script inline
-            // Padrão: "<ul class='lista'>...<li onclick='load(N);'>..." — o maior N é o total
-            const seasonsMatch = pageHtml.match(/onclick='load\((\d+)\)'/g);
-            const totalSeasons = seasonsMatch
-                ? Math.max(...seasonsMatch.map(m => parseInt(m.match(/\d+/)[0])))
-                : 1;
+            // A seção .vbEpisodes tem: data-video-id, data-current-season, data-current-audio,
+            // e um dropdown .vbSeasonSelect__option[data-season="N"] para cada temporada.
+            const sectionEl = vbEpisodesSection.first();
+            const currentSeason = parseInt(sectionEl.attr('data-current-season') || '1', 10);
+            const currentAudio = sectionEl.attr('data-current-audio') || 'Dublado';
 
-            // Detecta qual temporada está atualmente carregada pelo botão dropdown
-            const currentSeasonMatch = pageHtml.match(/<button[^>]*dropdown-toggle[^>]*>Temporada\s*(\d+)<\/button>/);
-            const currentSeason = currentSeasonMatch ? parseInt(currentSeasonMatch[1]) : 1;
+            // Lista todas as temporadas a partir dos botões do dropdown
+            const seasons = [];
+            sectionEl.find('.vbSeasonSelect__option').each((_, el) => {
+                const s = parseInt($(el).attr('data-season') || '0', 10);
+                if (s > 0 && !seasons.includes(s)) seasons.push(s);
+            });
+            const totalSeasons = seasons.length > 0 ? Math.max(...seasons) : currentSeason;
+            const audioToUse = currentAudio || 'Dublado';
 
-            // Helper para extrair episódios do HTML de uma temporada
-            const extractEpisodes = (html, seasonNum) => {
+            // Helper para fazer parse da lista de episódios no HTML (quando já vem na página,
+            // para a temporada atual)
+            const extractEpisodesFromHtml = (html, seasonNum) => {
                 const $$ = cheerio.load(html);
                 const eps = [];
-                $$('#listagem li').each((index, element) => {
-                    const linkTag = $$(element).find('a').first();
-                    const epUrl = linkTag.attr('href');
-                    const epName = linkTag.text().trim();
-                    const sortId = parseInt($$(element).attr('data-id')) || index;
+                $$('.vbEpisodeCard').each((index, element) => {
+                    const linkTag = $$(element).find('a.vbEpisodeCard__link').first();
+                    const epUrl = linkTag.attr('href') || '';
+                    const epTitle = cleanText($$(element).find('.vbEpisodeCard__title').first().text()) ||
+                                   cleanText($$(element).attr('data-title'));
+                    const epNumber = parseInt($$(element).attr('data-number')) || (index + 1);
+                    const epThumb = $$(element).find('.vbEpisodeCard__thumb img').attr('src') || '';
+                    const epDuration = cleanText($$(element).find('.vbEpisodeCard__duration').first().text());
+                    const epSynopsis = cleanText($$(element).find('.vbEpisodeCard__synopsis').first().text());
                     if (epUrl) {
                         eps.push({
-                            name: epName,
+                            name: epTitle,
+                            number: epNumber,
                             season: seasonNum,
                             player_id: extractId(epUrl),
                             url: epUrl,
-                            order: sortId
+                            thumb: epThumb,
+                            duration: epDuration,
+                            synopsis: epSynopsis,
+                            order: epNumber
                         });
                     }
                 });
                 return eps.sort((a, b) => a.order - b.order);
             };
 
-            // Temporada atual já está no HTML que já buscamos
+            // Helper para chamar o endpoint episodesList (AJAX do novo site)
+            const fetchEpisodesAjax = async (seasonNum) => {
+                const ajaxUrl = BASE_URL + EPISODES_LIST_ENDPOINT +
+                    '&id=' + encodeURIComponent(videoId) +
+                    '&season=' + encodeURIComponent(seasonNum) +
+                    '&audio=' + encodeURIComponent(audioToUse);
+                const resp = await axios.get(ajaxUrl, {
+                    headers: {
+                        ...mixdropHeaders,
+                        'Accept': 'application/json',
+                        'Referer': finalUrl,
+                        'X-Requested-With': 'XMLHttpRequest',
+                    },
+                    timeout: 15000,
+                    validateStatus: (s) => s < 500,
+                });
+                if (resp.status !== 200 || typeof resp.data !== 'object') {
+                    throw new Error(`episodesList status ${resp.status}`);
+                }
+                const episodes = resp.data.episodes || [];
+                return episodes.map((ep, index) => ({
+                    name: cleanText(ep.title) || `Episódio ${ep.number}`,
+                    number: parseInt(ep.number) || (index + 1),
+                    season: seasonNum,
+                    player_id: extractId(ep.url),
+                    url: ep.url,
+                    thumb: ep.thumb || '',
+                    duration: ep.duration ? `${ep.duration} min` : '',
+                    synopsis: cleanText(ep.synopsis),
+                    order: parseInt(ep.number) || (index + 1)
+                })).sort((a, b) => a.order - b.order);
+            };
+
+            // Temporada atual: usamos AJAX para garantir a lista completa.
+            // O HTML inicial às vezes só traz os primeiros episódios (lazy load via JS).
             const episodesBySeason = {};
-            episodesBySeason[currentSeason] = extractEpisodes(pageHtml, currentSeason);
+            try {
+                episodesBySeason[currentSeason] = await fetchEpisodesAjax(currentSeason);
+                console.log(`[info] Temporada ${currentSeason}: ${episodesBySeason[currentSeason].length} episódios via AJAX`);
+            } catch (e) {
+                console.error(`[info] AJAX falhou para temporada atual ${currentSeason}:`, e.message);
+                episodesBySeason[currentSeason] = extractEpisodesFromHtml(pageHtml, currentSeason);
+                console.log(`[info] Temporada ${currentSeason}: ${episodesBySeason[currentSeason].length} episódios via HTML (fallback)`);
+            }
 
-            // Busca as demais temporadas em paralelo
-            if (totalSeasons > 1) {
-                const basePageUrl = finalUrl.split('?')[0];
-                const otherSeasons = Array.from({ length: totalSeasons }, (_, i) => i + 1)
-                    .filter(s => s !== currentSeason);
-
+            // Demais temporadas via AJAX em paralelo
+            const otherSeasons = seasons.filter(s => s !== currentSeason);
+            if (otherSeasons.length > 0 && videoId) {
                 await Promise.all(otherSeasons.map(async (s) => {
                     try {
-                        const seasonUrl = `${basePageUrl}?area=online&temporada=${s}`;
-                        const { html: sHtml } = await fetchFollowingRedirects(seasonUrl);
-                        episodesBySeason[s] = extractEpisodes(sHtml, s);
+                        episodesBySeason[s] = await fetchEpisodesAjax(s);
+                        console.log(`[info] Temporada ${s}: ${episodesBySeason[s].length} episódios via AJAX`);
                     } catch (e) {
-                        console.error(`[info] Erro ao buscar temporada ${s}:`, e.message);
-                        episodesBySeason[s] = [];
+                        console.error(`[info] Erro ao buscar temporada ${s} via AJAX:`, e.message);
+                        // Fallback: tenta buscar via HTML da própria página da série com ?temporada=N
+                        try {
+                            const fallbackUrl = `${finalUrl.split('?')[0]}?temporada=${s}`;
+                            const { html: sHtml } = await fetchFollowingRedirects(fallbackUrl);
+                            episodesBySeason[s] = extractEpisodesFromHtml(sHtml, s);
+                            console.log(`[info] Temporada ${s}: ${episodesBySeason[s].length} episódios via fallback HTML`);
+                        } catch (e2) {
+                            console.error(`[info] Fallback HTML também falou para temporada ${s}:`, e2.message);
+                            episodesBySeason[s] = [];
+                        }
                     }
                 }));
             }
@@ -515,9 +758,11 @@ app.get('/v1/info', async (req, res) => {
             const allEpisodes = Object.keys(episodesBySeason)
                 .map(Number)
                 .sort((a, b) => a - b)
-                .flatMap(s => episodesBySeason[s]);
+                .flatMap(s => episodesBySeason[s] || []);
 
             result.total_seasons = totalSeasons;
+            result.current_season = currentSeason;
+            result.audio = audioToUse;
             result.episodes = allEpisodes;
             result.episodes_by_season = episodesBySeason;
         } else {
@@ -527,28 +772,28 @@ app.get('/v1/info', async (req, res) => {
 
         res.json(result);
     } catch (error) {
-        console.error(error);
-        res.status(500).json({ error: "Erro ao pegar detalhes" });
+        console.error('[info] Erro:', error.message);
+        res.status(500).json({ error: "Erro ao pegar detalhes", detail: error.message });
     }
 });
 
-// --- ROTA WATCH: getplay.php → mixdrop → unpack → proxy ---
+// --- ROTA WATCH: playerData → mixdrop → unpack → proxy ---
 
 app.get('/v1/watch/:id', async (req, res) => {
     const { id } = req.params;
-    const sv = 'mixdrop'; // fixo: apenas Mixdrop, apenas Dublado
     const asJson = req.query.json === '1';
 
     if (!id) return res.status(400).json({ error: "ID inválido" });
 
     try {
-        // 1. getplay.php → URL do mixdrop
-        const playerUrl = await followGetplay(id, sv);
-        const fid = getMixdropFID(playerUrl);
-        if (!fid) throw new Error('FID não encontrado: ' + playerUrl);
+        // 1. playerData → FID do Mixdrop
+        const playerData = await fetchPlayerData(id);
+        if (!playerData.fid) {
+            throw new Error(`Mixdrop FID não encontrado no playerData (id=${id}). servers_dub="${playerData.serversDub}" servers_leg="${playerData.serversLeg}"`);
+        }
 
         // 2. Resolve MP4 + cookies
-        const { directUrl, cookies, referer, title } = await resolveMixdrop(fid);
+        const { directUrl, cookies, referer, title } = await resolveMixdrop(playerData.fid);
 
         // 3. Salva sessão para o proxy de stream
         const sessionId = Math.random().toString(36).substring(2, 15);
@@ -557,10 +802,11 @@ app.get('/v1/watch/:id', async (req, res) => {
         const streamUrl = `/api/stream/${sessionId}`;
         const host = `https://apijvflix-1.onrender.com`;
 
-        // Retorna JSON com as informações ou redireciona pro stream
         return res.json({
             title,
-            fid,
+            fid: playerData.fid,
+            audio: playerData.audio,
+            is_episode: playerData.isEpisode,
             streamUrl: host + streamUrl,
             mp4Url: directUrl
         });
@@ -573,23 +819,24 @@ app.get('/v1/watch/:id', async (req, res) => {
 
 // Rota auxiliar: resolve a partir da URL da página
 app.get('/v1/play', async (req, res) => {
-    let { url, sv } = req.query;
+    let { url } = req.query;
     if (!url) return res.status(400).json({ error: "URL obrigatória" });
     if (!url.startsWith('http')) url = BASE_URL + url;
 
-    const server = 'mixdrop'; // fixo: apenas Mixdrop, apenas Dublado
+    // Remover ?area=online (causa 403 no novo site)
+    const parsedUrl = new URL(url);
+    parsedUrl.searchParams.delete('area');
+    url = parsedUrl.href;
 
     try {
-        if (!url.includes('area=online')) url = url.includes('?') ? `${url}&area=online` : `${url}?area=online`;
         const { html: pageHtml } = await fetchFollowingRedirects(url);
         const videoId = extractVideoId(pageHtml);
         if (!videoId) return res.status(404).json({ error: "video_id não encontrado na página" });
 
-        const playerUrl = await followGetplay(videoId, server);
-        const fid = getMixdropFID(playerUrl);
-        if (!fid) throw new Error('FID não encontrado: ' + playerUrl);
+        const playerData = await fetchPlayerData(videoId);
+        if (!playerData.fid) throw new Error('Mixdrop FID não encontrado no playerData');
 
-        const { directUrl, cookies, referer, title } = await resolveMixdrop(fid);
+        const { directUrl, cookies, referer, title } = await resolveMixdrop(playerData.fid);
 
         const sessionId = Math.random().toString(36).substring(2, 15);
         videoSessions.set(sessionId, { mp4Url: directUrl, cookies, referer });
@@ -597,7 +844,8 @@ app.get('/v1/play', async (req, res) => {
         const host = `${req.protocol}://${req.get('host')}`;
         return res.json({
             title,
-            fid,
+            fid: playerData.fid,
+            audio: playerData.audio,
             streamUrl: host + `/api/stream/${sessionId}`,
             mp4Url: directUrl
         });
@@ -677,7 +925,6 @@ app.get('/v1/getlives', async (req, res) => {
             return res.status(502).json({ success: false, error: 'Resposta inválida da API de lives' });
         }
 
-        // Injeta watchlive_url em cada embed para facilitar uso direto
         const host = `${req.protocol}://${req.get('host')}`;
         const enriched = (data.data || []).map(event => ({
             ...event,
@@ -706,7 +953,6 @@ app.get('/v1/watchlive', async (req, res) => {
     if (!url) return res.status(400).json({ error: "Parâmetro 'url' obrigatório" });
 
     try {
-        // Busca o HTML da página do esportesembed
         const pageResp = await axios.get(url, {
             headers: {
                 'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Mobile Safari/537.36',
@@ -719,21 +965,18 @@ app.get('/v1/watchlive', async (req, res) => {
 
         const $ = cheerio.load(pageResp.data);
 
-        // Pega o src do primeiro iframe do body
         const iframeSrc = $('body iframe').first().attr('src');
 
         if (!iframeSrc) {
             return res.status(404).json({ error: 'Nenhum iframe encontrado na página do embed' });
         }
 
-        // Resolve URL relativa se necessário
         const resolvedSrc = iframeSrc.startsWith('http')
             ? iframeSrc
             : iframeSrc.startsWith('//')
                 ? 'https:' + iframeSrc
                 : new URL(iframeSrc, url).href;
 
-        // Usa o proxy de iframe com origin/referer reidoscanais.ooo
         const proxyUrl = `${req.protocol}://${req.get('host')}/api/live-proxy?url=${encodeURIComponent(resolvedSrc)}`;
 
         const html = `<!DOCTYPE html>
@@ -800,11 +1043,9 @@ app.get('/api/live-proxy', async (req, res) => {
             maxRedirects: 5
         });
 
-        // Repassa o content-type original
         const contentType = targetResp.headers['content-type'] || 'text/html';
         res.setHeader('Content-Type', contentType);
 
-        // Remove X-Frame-Options e CSP para permitir embed
         res.removeHeader('X-Frame-Options');
         res.setHeader(
             'Content-Security-Policy',
@@ -824,6 +1065,7 @@ app.get('/api/live-proxy', async (req, res) => {
 if (require.main === module) {
     app.listen(PORT, () => {
         console.log(`Servidor rodando na porta ${PORT}`);
+        console.log(`BASE_URL: ${BASE_URL}`);
     });
 }
 
