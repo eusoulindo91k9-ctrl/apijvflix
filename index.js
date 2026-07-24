@@ -23,7 +23,7 @@ app.use((req, res, next) => {
 // A API antiga usava pobreflixtv.autos + token fixo + endpoint /e/getplay.php.
 // O novo site é IPS (Invision) e usa endpoints index.php?app=videobox&...
 // Não há mais token nem sv=mixdrop — o playerData retorna TODOS os servers.
-const BASE_URL = 'https://www.pobreflixtv.kaufen';
+const BASE_URL = 'https://www.pobreflixtv.republican';
 const PLAYER_DATA_ENDPOINT = '/index.php?app=videobox&module=video&controller=view&do=playerData&id=';
 const EPISODES_LIST_ENDPOINT = '/index.php?app=videobox&module=video&controller=view&do=episodesList';
 const SEARCH_ENDPOINT = '/index.php?app=videobox&module=video&controller=index&do=buscarContent';
