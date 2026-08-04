@@ -18,12 +18,15 @@ app.use((req, res, next) => {
     next();
 });
 
-// === NOVO DOMÍNIO DO POBREFLIX (atualizado em 2026) ===
-// Site original: https://www.pobreflixtv.gift/
-// A API antiga usava pobreflixtv.autos + token fixo + endpoint /e/getplay.php.
-// O novo site é IPS (Invision) e usa endpoints index.php?app=videobox&...
-// Não há mais token nem sv=mixdrop — o playerData retorna TODOS os servers.
-const BASE_URL = 'https://www.pobreflixtv.link';
+// === DOMÍNIO DO POBREFLIX ===
+// Site original declarado: https://www.pobreflixtv.link
+// Caso esse domínio redirecione (301/302/meta) para outro host,
+// a função initBaseUrl() detecta o destino e atualiza BASE_URL dinamicamente,
+// fazendo todas as rotas seguintes usarem o novo domínio.
+const ORIGINAL_BASE_URL = 'https://www.pobreflixtv.link';
+let BASE_URL = ORIGINAL_BASE_URL;
+let baseUrlInitialized = false;
+
 const PLAYER_DATA_ENDPOINT = '/index.php?app=videobox&module=video&controller=view&do=playerData&id=';
 const EPISODES_LIST_ENDPOINT = '/index.php?app=videobox&module=video&controller=view&do=episodesList';
 const SEARCH_ENDPOINT = '/index.php?app=videobox&module=video&controller=index&do=buscarContent';
@@ -52,35 +55,24 @@ const videoSessions = new Map();
 
 const extractId = (url) => {
     if (!url) return null;
-    // Padrão: ...-slug-12345/  (qualquer URL de filme/série/episódio do pobreflix termina com -<id>/)
     const matches = url.match(/-(\d+)\/?$/);
     return matches ? matches[1] : null;
 };
 
 const cleanText = (text) => text ? text.replace(/\n/g, '').replace(/\s+/g, ' ').trim() : '';
 
-/**
- * Extrai o video_id da página de detalhes.
- * No novo site, o ID é exposto diretamente como <div id="view" data-video-id="12345">.
- * Mantemos um fallback para o padrão antigo C_Video('12345') por segurança.
- */
 const extractVideoId = (html) => {
-    // 1. Padrão novo (filmes): <div id="view" data-video-id="12345" ...>
     const viewDivMatch = html.match(/<div[^>]*id=["']view["'][^>]*data-video-id=["'](\d+)["']/i);
     if (viewDivMatch) return viewDivMatch[1];
 
-    // 2. Padrão novo (séries): <section class="vbEpisodes" data-video-id="12345" ...>
     const sectionMatch = html.match(/<section[^>]*class=["'][^"']*vbEpisodes[^"']*["'][^>]*data-video-id=["'](\d+)["']/i);
     if (sectionMatch) return sectionMatch[1];
-    // Variante: data-video-id pode vir antes de class
     const sectionMatch2 = html.match(/<section[^>]*data-video-id=["'](\d+)["'][^>]*class=["'][^"']*vbEpisodes[^"']*["']/i);
     if (sectionMatch2) return sectionMatch2[1];
 
-    // 3. Padrão antigo: function NewAudio() ... C_Video('12345')
     const newAudioMatch = html.match(/function\s+NewAudio\s*\(\s*\)[\s\S]*?C_Video\s*\(\s*['"](\d+)['"]/);
     if (newAudioMatch) return newAudioMatch[1];
 
-    // 4. Fallback: primeiro C_Video encontrado
     const match = html.match(/C_Video\(['"](\d+)['"]/);
     return match ? match[1] : null;
 };
@@ -139,6 +131,19 @@ const fetchFollowingRedirects = async (startUrl, { maxRedirects = 10 } = {}) => 
             continue;
         }
 
+        // Detecta meta refresh / JS redirect no HTML
+        if (status === 200 && typeof resp.data === 'string') {
+            const metaMatch = resp.data.match(/<meta[^>]+http-equiv=["']?refresh["']?[^>]+content=["'][^"']*url=([^"'>]+)/i);
+            if (metaMatch) {
+                const resolved = new URL(metaMatch[1].trim(), currentUrl).href;
+                if (resolved !== currentUrl) {
+                    console.log(`[fetchFollowingRedirects] meta-refresh ${currentUrl} → ${resolved}`);
+                    currentUrl = resolved;
+                    continue;
+                }
+            }
+        }
+
         console.log(`[fetchFollowingRedirects] ${status} ${currentUrl} (${hops} hop(s))`);
         return { html: resp.data, finalUrl: currentUrl };
     }
@@ -147,22 +152,37 @@ const fetchFollowingRedirects = async (startUrl, { maxRedirects = 10 } = {}) => 
 };
 
 /**
- * Parser de card no novo layout do Pobreflix.
- * Estrutura típica:
- *   <div class="swiper-slide vbTabSliderItem">
- *     <a href="..." class="block" title="Assistir X">
- *       <div class="blocktwo">
- *         <img src="..." alt="...">
- *         <div class="from-background/20" ...></div>
- *         <div class="top"><div>HD</div><div>DUAL</div></div>
- *         <div class="info"><h3>Title</h3><p>2026</p></div>
- *       </div>
- *     </a>
- *   </div>
+ * Inicializa o BASE_URL efetivo seguindo redirects da URL original.
+ * Idempotente: roda a verificação só na primeira chamada.
+ * Se pobreflixtv.link redirecionar para outro host, atualiza BASE_URL global
+ * e reconfigura o axios instance para usar o novo domínio.
  */
+const initBaseUrl = async () => {
+    if (baseUrlInitialized) return BASE_URL;
+    baseUrlInitialized = true;
+    try {
+        const { finalUrl } = await fetchFollowingRedirects(ORIGINAL_BASE_URL);
+        if (finalUrl) {
+            const parsed = new URL(finalUrl);
+            const newBase = `${parsed.protocol}//${parsed.host}`;
+            if (newBase !== ORIGINAL_BASE_URL) {
+                console.log(`[initBaseUrl] BASE_URL atualizado: ${ORIGINAL_BASE_URL} → ${newBase}`);
+                BASE_URL = newBase;
+            } else {
+                console.log(`[initBaseUrl] BASE_URL mantido: ${BASE_URL}`);
+            }
+            // Reconfigura o axios instance para usar o BASE_URL efetivo
+            api.defaults.baseURL = BASE_URL;
+            api.defaults.headers['Referer'] = BASE_URL + '/';
+        }
+    } catch (e) {
+        console.error('[initBaseUrl] Falha ao detectar redirect, mantendo BASE_URL original:', e.message);
+    }
+    return BASE_URL;
+};
+
 const parseCard = ($, element) => {
     try {
-        // O elemento pode ser o próprio <a class="block"> ou um container que o contém.
         const $el = $(element);
         const isAnchor = $el.is('a.block');
         const anchor = isAnchor ? $el : $el.find('a.block').first();
@@ -173,7 +193,6 @@ const parseCard = ($, element) => {
         if (!title) {
             title = cleanText($el.find('.info h3').first().text());
         }
-        // Remove prefixo "Assistir " se presente
         if (title.toLowerCase().startsWith('assistir ')) {
             title = title.slice(9).trim();
         }
@@ -184,7 +203,6 @@ const parseCard = ($, element) => {
 
         const year = cleanText($el.find('.info p').first().text());
 
-        // Qualidades: múltiplos <div> dentro de .top (ex: HD, DUAL, DUB, LEG)
         const qualities = [];
         $el.find('.top > div').each((_, el) => {
             const q = cleanText($(el).text());
@@ -202,7 +220,6 @@ const parseCard = ($, element) => {
 
 const getMixdropFID = (url) => {
     if (!url) return null;
-    // Aceita todos os domínios conhecidos do Mixdrop (incluindo os novos miixdrop.net / miiiixdrop.net / mxdrop.sx)
     const m = url.match(/(?:mixdrop\.[a-z]+|miixdrop\.[a-z]+|miiiixdrop\.[a-z]+|mxdrop\.[a-z]+|mdy48tn97\.com|mdbekjwqa\.pw|mdfx9dc8n\.net|mdzsmutpcvykb\.net)\/(?:f|e)\/([a-z0-9]+)/i);
     return m ? m[1] : null;
 };
@@ -222,25 +239,10 @@ const extractMixdropUrl = (html) => {
     return null;
 };
 
-// --- NOVO: PLAYER DATA → extrai FID do Mixdrop ---
+// --- PLAYER DATA → extrai FID do Mixdrop ---
 
-/**
- * Chama o endpoint playerData do novo Pobreflix e retorna:
- *   { fid, mixdropUrl, audio, isEpisode, serversDub, serversLeg, navigation }
- *
- * O JSON retornado pelo site tem formato:
- *   {
- *     "players": [{"label":"MixDrop","url":"https://miixdrop.net/e/","downloadUrl":"..."}],
- *     "servers_dub": "mixdrop=abc123&streamtape=...&byse=...",
- *     "servers_leg": "mixdrop=def456&streamtape=...&byse=...",
- *     "is_episode": "1" | "",
- *     "current_audio": "Dublado" | "Legendado",
- *     "navigation": {"prev":"","next":"","series":""}
- *   }
- *
- * O FID do Mixdrop vem em servers_dub OU servers_leg (query-string com provider=fid).
- */
 const fetchPlayerData = async (videoId) => {
+    await initBaseUrl();
     const url = BASE_URL + PLAYER_DATA_ENDPOINT + encodeURIComponent(videoId);
 
     const resp = await axios.get(url, {
@@ -260,17 +262,14 @@ const fetchPlayerData = async (videoId) => {
 
     const data = resp.data;
 
-    // Decodifica &amp; → & caso o servidor retorne HTML-entities na query-string
     const decodeEntities = (s) => (s || '').replace(/&amp;/g, '&');
 
     const serversDubRaw = decodeEntities(data.servers_dub || '');
     const serversLegRaw = decodeEntities(data.servers_leg || '');
 
-    // Tenta Dublado primeiro; se vazio, usa Legendado
     const chosenRaw = serversDubRaw || serversLegRaw;
     const audio = serversDubRaw ? 'Dublado' : (serversLegRaw ? 'Legendado' : (data.current_audio || ''));
 
-    // Parse da query-string "mixdrop=fid&streamtape=fid&byse=fid&doodstream=fid"
     const servers = {};
     if (chosenRaw) {
         for (const pair of chosenRaw.split('&')) {
@@ -279,7 +278,6 @@ const fetchPlayerData = async (videoId) => {
         }
     }
 
-    // Encontra o URL base do Mixdrop no array de players
     const mixdropPlayer = (data.players || []).find(p => /mixdrop/i.test(p.label || '') || getMixdropFID(p.url + 'xxxxx'));
     const mixdropBaseUrl = mixdropPlayer ? mixdropPlayer.url : 'https://miixdrop.net/e/';
 
@@ -345,8 +343,7 @@ const MIXDROP_API_MAIL = 'psp@jdownloader.org';
 const MIXDROP_API_KEY  = 'u3aH2kgUYOQ36hd';
 
 const resolveMixdrop = async (fid) => {
-    // 1. Verifica existência via API oficial
-    const apiUrl = `${MIXDROP_API}/fileinfo?email=${encodeURIComponent(MIXDROP_API_MAIL)}&key=${MIXDROP_API_KEY}&ref[]=${fid}`;
+    const apiUrl = `${MIXDROP_API}/fileinfo?email=${encodeURIComponent(MIXDROP_API_MAIL)}&key=${encodeURIComponent(MIXDROP_API_KEY)}&ref[]=${fid}`;
     const apiResp = await axios.get(apiUrl, { headers: mixdropHeaders, timeout: 15000 });
     const json = apiResp.data;
 
@@ -355,9 +352,6 @@ const resolveMixdrop = async (fid) => {
     if (!fileInfo) throw new Error('Arquivo não retornado pelo mixdrop');
     if (fileInfo.deleted) throw new Error('Arquivo deletado no mixdrop');
 
-    // 2. Acessa a página embed e pega cookies.
-    //    mixdrop.top continua sendo o ponto de entrada estável — ele redireciona
-    //    para o domínio atual (miixdrop.net / miiiixdrop.net / mxdrop.sx etc.).
     const embedUrl = `https://mixdrop.top/e/${fid}`;
     const pageResp = await axios.get(embedUrl, {
         headers: { ...mixdropHeaders, 'Referer': BASE_URL + '/' },
@@ -372,7 +366,6 @@ const resolveMixdrop = async (fid) => {
 
     let html = typeof pageResp.data === 'string' ? pageResp.data : '';
 
-    // 3. Tenta extrair MP4 por padrões diretos no JS
     let directUrl = null;
     const directPatterns = [
         /MDCore\.wurl\s*=\s*["']([^"']+\.mp4[^"']*)/i,
@@ -386,7 +379,6 @@ const resolveMixdrop = async (fid) => {
         if (m) { directUrl = m[1]; break; }
     }
 
-    // 4. Tenta via unpack (p,a,c,k,e,d)
     if (!directUrl) {
         const packedMatch = html.match(/(eval\(function\(p,a,c,k,e,d[\s\S]*?<\/script>)/);
         if (packedMatch) {
@@ -395,7 +387,6 @@ const resolveMixdrop = async (fid) => {
         }
     }
 
-    // 5. Tenta link ?download
     if (!directUrl) {
         const continueMatch = html.match(/((?:\/f\/[a-z0-9]+)?\?download)/i);
         if (continueMatch) {
@@ -427,7 +418,8 @@ const resolveMixdrop = async (fid) => {
 app.get('/', (req, res) => {
     res.json({
         status: "Online",
-        msg: "API JVFlix (Pobreflix .gift)",
+        msg: "API JVFlix (Pobreflix)",
+        base_url: BASE_URL,
         endpoints: {
             home: "/v1/get/recommeds",
             search: "/v1/search?s=nome",
@@ -442,13 +434,10 @@ app.get('/', (req, res) => {
 
 /**
  * Home — recomendações.
- *
- * O novo site tem 2 seções <section id="vbTabSlider" aria-label="Filmes|Séries">,
- * cada uma com 3 painéis: releases_<widgetKey>_html, latest_<widgetKey>_html, mostviewed_<widgetKey>_html.
- * Por compatibilidade mantemos releases/trending, onde trending = mostviewed.
  */
 app.get('/v1/get/recommeds', async (req, res) => {
     try {
+        await initBaseUrl();
         const response = await api.get('/');
         const $ = cheerio.load(response.data);
 
@@ -457,25 +446,19 @@ app.get('/v1/get/recommeds', async (req, res) => {
             series: { releases: [], trending: [] }
         };
 
-        // Encontra as duas seções vbTabSlider
         const sections = $('section#vbTabSlider');
         if (sections.length === 0) {
             return res.status(502).json({ error: "Estrutura da home mudou — nenhum #vbTabSlider encontrado" });
         }
 
         const fillSection = ($section, target) => {
-            // O id do widget é a classe do section (ex: kw8a73lf1)
             const widgetKey = ($section.attr('class') || '').split(' ').find(c => /^[a-z0-9]{8,}$/i.test(c));
             if (!widgetKey) return;
 
-            // Painel de Lançamentos
             $section.find(`.vbPanel-container.releases_${widgetKey}_html .swiper-slide`).each((i, el) => {
                 const card = parseCard($, el);
                 if (card && card.id) target.releases.push(card);
             });
-            // Painel "trending": tentamos mostviewed (Mais Vistos) primeiro; se vier vazio
-            // (o site carrega esse painel via AJAX só quando o usuário clica na aba),
-            // caímos para latest (Recentes), que já vem renderizado no HTML.
             $section.find(`.vbPanel-container.mostviewed_${widgetKey}_html .swiper-slide`).each((i, el) => {
                 const card = parseCard($, el);
                 if (card && card.id) target.trending.push(card);
@@ -488,7 +471,6 @@ app.get('/v1/get/recommeds', async (req, res) => {
             }
         };
 
-        // Filmes = primeira seção (aria-label="Filmes"); Séries = segunda (aria-label="Séries")
         sections.each((_, sec) => {
             const $sec = $(sec);
             const label = ($sec.attr('aria-label') || '').toLowerCase();
@@ -505,15 +487,13 @@ app.get('/v1/get/recommeds', async (req, res) => {
 
 /**
  * Search — busca via endpoint AJAX.
- *
- * URL: /index.php?app=videobox&module=video&controller=index&do=buscarContent&q=<query>
- * Retorna: {"html": "<cards...>"}
  */
 app.get('/v1/search', async (req, res) => {
     const query = req.query.s;
     if (!query) return res.status(400).json({ error: "Parâmetro 's' obrigatório" });
 
     try {
+        await initBaseUrl();
         const url = BASE_URL + SEARCH_ENDPOINT + '&q=' + encodeURIComponent(query);
         const resp = await axios.get(url, {
             headers: {
@@ -526,7 +506,6 @@ app.get('/v1/search', async (req, res) => {
             validateStatus: (s) => s < 500,
         });
 
-        // O endpoint pode retornar JSON {html:"..."} ou diretamente HTML
         let html = '';
         if (resp.status === 200) {
             if (typeof resp.data === 'string') {
@@ -543,15 +522,11 @@ app.get('/v1/search', async (req, res) => {
         const $ = cheerio.load(html);
         const results = [];
 
-        // No resultado da busca os cards vêm como <a class="block"> soltos
-        // (sem wrapper .swiper-slide). parseCard já procura por a.block internamente,
-        // então passamos o próprio <a> como container.
         $('a.block').each((i, el) => {
             const card = parseCard($, el);
             if (card && card.id) results.push(card);
         });
 
-        // Dedup por id (às vezes o mesmo filme aparece duas vezes)
         const seen = new Set();
         const deduped = results.filter(r => {
             if (seen.has(r.id)) return false;
@@ -568,17 +543,15 @@ app.get('/v1/search', async (req, res) => {
 
 /**
  * Info — detalhes de filme/série/episódio.
- *
- * IMPORTANTE: o novo site retorna 403 se a URL tiver ?area=online.
- * Não usamos mais esse parâmetro — a página em si já contém o data-video-id.
  */
 app.get('/v1/info', async (req, res) => {
     let { url, season } = req.query;
     if (!url) return res.status(400).json({ error: "URL obrigatória" });
+
+    await initBaseUrl();
+
     if (!url.startsWith('http')) url = BASE_URL + url;
 
-    // NOVO: NÃO adicionar ?area=online (causa 403 no novo domínio)
-    // Removemos qualquer ?area=online que vier na URL do cliente
     const parsedUrl = new URL(url);
     parsedUrl.searchParams.delete('area');
     if (season) parsedUrl.searchParams.set('temporada', season);
@@ -588,41 +561,33 @@ app.get('/v1/info', async (req, res) => {
         const { html: pageHtml, finalUrl } = await fetchFollowingRedirects(url);
         const $ = cheerio.load(pageHtml);
 
-        // Detecção de série: presença de <section class="vbEpisodes"> OU URL com /series/online/
         const vbEpisodesSection = $('.vbEpisodes');
         const isSeries = vbEpisodesSection.length > 0 || finalUrl.includes('/series/online/');
 
-        // Título: <h2 class="one"> é o título limpo; <h1 class="type"> é "Assistir X Online"
         const titleH2 = cleanText($('.one').first().text());
         const titleH1 = cleanText($('.type').first().text());
         const title = titleH2 || titleH1.replace(/^Assistir\s+/i, '').replace(/\s+Online$/i, '').trim();
 
-        // Thumb: .vbItemImage img (novo layout)
         let thumb = $('.vbItemImage img').attr('src') || '';
         if (!thumb) {
-            // Fallback antigo
             thumb = $('.vb_image_container').attr('data-background-src') || '';
         }
         if (thumb && !thumb.startsWith('http')) thumb = BASE_URL + thumb;
 
-        // Sinopse: .sinopse-text
         const desc = cleanText($('.sinopse-text').first().text()) ||
                      cleanText($('.sinopse').text().replace('Ler mais...', ''));
 
-        // Ano / duração / nota: vêm no <span class="meta-info"> como "7.6 • 2026 • 1h, 53min"
         const metaInfoText = cleanText($('.meta-info').first().text());
         let year = '';
-        let imdb = cleanText($('.nota').first().text()); // na verdade é nota TMDB
+        let imdb = cleanText($('.nota').first().text());
         if (metaInfoText) {
             const yearMatch = metaInfoText.match(/\b(19|20)\d{2}\b/);
             if (yearMatch) year = yearMatch[0];
         }
-        // Fallback: classe .infos span[1] (antigo layout)
         if (!year) {
             year = cleanText($('.infos span').eq(1).text());
         }
 
-        // Video ID: <div id="view" data-video-id="...">
         const videoId = extractVideoId(pageHtml);
         const pageId = extractId(finalUrl);
 
@@ -640,13 +605,10 @@ app.get('/v1/info', async (req, res) => {
         };
 
         if (isSeries) {
-            // A seção .vbEpisodes tem: data-video-id, data-current-season, data-current-audio,
-            // e um dropdown .vbSeasonSelect__option[data-season="N"] para cada temporada.
             const sectionEl = vbEpisodesSection.first();
             const currentSeason = parseInt(sectionEl.attr('data-current-season') || '1', 10);
             const currentAudio = sectionEl.attr('data-current-audio') || 'Dublado';
 
-            // Lista todas as temporadas a partir dos botões do dropdown
             const seasons = [];
             sectionEl.find('.vbSeasonSelect__option').each((_, el) => {
                 const s = parseInt($(el).attr('data-season') || '0', 10);
@@ -655,8 +617,6 @@ app.get('/v1/info', async (req, res) => {
             const totalSeasons = seasons.length > 0 ? Math.max(...seasons) : currentSeason;
             const audioToUse = currentAudio || 'Dublado';
 
-            // Helper para fazer parse da lista de episódios no HTML (quando já vem na página,
-            // para a temporada atual)
             const extractEpisodesFromHtml = (html, seasonNum) => {
                 const $$ = cheerio.load(html);
                 const eps = [];
@@ -686,7 +646,6 @@ app.get('/v1/info', async (req, res) => {
                 return eps.sort((a, b) => a.order - b.order);
             };
 
-            // Helper para chamar o endpoint episodesList (AJAX do novo site)
             const fetchEpisodesAjax = async (seasonNum) => {
                 const ajaxUrl = BASE_URL + EPISODES_LIST_ENDPOINT +
                     '&id=' + encodeURIComponent(videoId) +
@@ -719,8 +678,6 @@ app.get('/v1/info', async (req, res) => {
                 })).sort((a, b) => a.order - b.order);
             };
 
-            // Temporada atual: usamos AJAX para garantir a lista completa.
-            // O HTML inicial às vezes só traz os primeiros episódios (lazy load via JS).
             const episodesBySeason = {};
             try {
                 episodesBySeason[currentSeason] = await fetchEpisodesAjax(currentSeason);
@@ -731,7 +688,6 @@ app.get('/v1/info', async (req, res) => {
                 console.log(`[info] Temporada ${currentSeason}: ${episodesBySeason[currentSeason].length} episódios via HTML (fallback)`);
             }
 
-            // Demais temporadas via AJAX em paralelo
             const otherSeasons = seasons.filter(s => s !== currentSeason);
             if (otherSeasons.length > 0 && videoId) {
                 await Promise.all(otherSeasons.map(async (s) => {
@@ -740,7 +696,6 @@ app.get('/v1/info', async (req, res) => {
                         console.log(`[info] Temporada ${s}: ${episodesBySeason[s].length} episódios via AJAX`);
                     } catch (e) {
                         console.error(`[info] Erro ao buscar temporada ${s} via AJAX:`, e.message);
-                        // Fallback: tenta buscar via HTML da própria página da série com ?temporada=N
                         try {
                             const fallbackUrl = `${finalUrl.split('?')[0]}?temporada=${s}`;
                             const { html: sHtml } = await fetchFollowingRedirects(fallbackUrl);
@@ -754,7 +709,6 @@ app.get('/v1/info', async (req, res) => {
                 }));
             }
 
-            // Lista flat ordenada por temporada (compatibilidade)
             const allEpisodes = Object.keys(episodesBySeason)
                 .map(Number)
                 .sort((a, b) => a - b)
@@ -767,7 +721,8 @@ app.get('/v1/info', async (req, res) => {
             result.episodes_by_season = episodesBySeason;
         } else {
             const watchId = videoId || pageId;
-            result.watch_link = `${req.protocol}://${req.get('host')}/v1/watch/${watchId}`;
+            // Host atualizado do watch link
+            result.watch_link = `https://apijvflix-1-g6uk.onrender.com/v1/watch/${watchId}`;
         }
 
         res.json(result);
@@ -781,12 +736,11 @@ app.get('/v1/info', async (req, res) => {
 
 app.get('/v1/watch/:id', async (req, res) => {
     const { id } = req.params;
-    const asJson = req.query.json === '1';
 
     if (!id) return res.status(400).json({ error: "ID inválido" });
 
     try {
-        // 1. playerData → FID do Mixdrop
+        // 1. playerData → FID do Mixdrop (initBaseUrl é chamado dentro)
         const playerData = await fetchPlayerData(id);
         if (!playerData.fid) {
             throw new Error(`Mixdrop FID não encontrado no playerData (id=${id}). servers_dub="${playerData.serversDub}" servers_leg="${playerData.serversLeg}"`);
@@ -800,7 +754,8 @@ app.get('/v1/watch/:id', async (req, res) => {
         videoSessions.set(sessionId, { mp4Url: directUrl, cookies, referer });
 
         const streamUrl = `/api/stream/${sessionId}`;
-        const host = `https://apijvflix-1.onrender.com`;
+        // Host atualizado (NOVO DOMÍNIO DO RENDER)
+        const host = `https://apijvflix-1-g6uk.onrender.com`;
 
         return res.json({
             title,
@@ -821,9 +776,11 @@ app.get('/v1/watch/:id', async (req, res) => {
 app.get('/v1/play', async (req, res) => {
     let { url } = req.query;
     if (!url) return res.status(400).json({ error: "URL obrigatória" });
+
+    await initBaseUrl();
+
     if (!url.startsWith('http')) url = BASE_URL + url;
 
-    // Remover ?area=online (causa 403 no novo site)
     const parsedUrl = new URL(url);
     parsedUrl.searchParams.delete('area');
     url = parsedUrl.href;
@@ -841,7 +798,7 @@ app.get('/v1/play', async (req, res) => {
         const sessionId = Math.random().toString(36).substring(2, 15);
         videoSessions.set(sessionId, { mp4Url: directUrl, cookies, referer });
 
-        const host = `${req.protocol}://${req.get('host')}`;
+        const host = `https://apijvflix-1-g6uk.onrender.com`;
         return res.json({
             title,
             fid: playerData.fid,
@@ -856,7 +813,7 @@ app.get('/v1/play', async (req, res) => {
     }
 });
 
-// --- PROXY DE STREAM: injeta cookies e faz pipe do CDN ---
+// --- PROXY DE STREAM ---
 
 app.get('/api/stream/:sessionId', async (req, res) => {
     const sessionData = videoSessions.get(req.params.sessionId);
@@ -894,7 +851,7 @@ app.get('/api/stream/:sessionId', async (req, res) => {
     }
 });
 
-// --- LIVES: busca eventos ao vivo do reidoscanais ---
+// --- LIVES ---
 
 const LIVES_API_URL = 'https://api.reidoscanais.ooo/sports?status=live';
 const LIVES_HEADERS = {
@@ -925,7 +882,7 @@ app.get('/v1/getlives', async (req, res) => {
             return res.status(502).json({ success: false, error: 'Resposta inválida da API de lives' });
         }
 
-        const host = `${req.protocol}://${req.get('host')}`;
+        const host = `https://apijvflix-1-g6uk.onrender.com`;
         const enriched = (data.data || []).map(event => ({
             ...event,
             embeds: (event.embeds || []).map(embed => ({
@@ -946,7 +903,7 @@ app.get('/v1/getlives', async (req, res) => {
     }
 });
 
-// --- WATCHLIVE: extrai src do iframe do esportesembed e serve como player proxy ---
+// --- WATCHLIVE ---
 
 app.get('/v1/watchlive', async (req, res) => {
     const { url } = req.query;
@@ -977,7 +934,7 @@ app.get('/v1/watchlive', async (req, res) => {
                 ? 'https:' + iframeSrc
                 : new URL(iframeSrc, url).href;
 
-        const proxyUrl = `${req.protocol}://${req.get('host')}/api/live-proxy?url=${encodeURIComponent(resolvedSrc)}`;
+        const proxyUrl = `https://apijvflix-1-g6uk.onrender.com/api/live-proxy?url=${encodeURIComponent(resolvedSrc)}`;
 
         const html = `<!DOCTYPE html>
 <html>
@@ -1015,7 +972,7 @@ app.get('/v1/watchlive', async (req, res) => {
     }
 });
 
-// --- PROXY DE IFRAME: injeta origin e referer reidoscanais.ooo ---
+// --- PROXY DE IFRAME ---
 
 app.get('/api/live-proxy', async (req, res) => {
     const { url } = req.query;
@@ -1063,9 +1020,13 @@ app.get('/api/live-proxy', async (req, res) => {
 // --- START ---
 
 if (require.main === module) {
+    // Tenta pré-inicializar o BASE_URL no boot (fire-and-forget).
+    // Mesmo que falhe aqui, cada rota chama initBaseUrl() novamente.
+    initBaseUrl().catch(e => console.error('[boot] initBaseUrl falhou:', e.message));
+
     app.listen(PORT, () => {
         console.log(`Servidor rodando na porta ${PORT}`);
-        console.log(`BASE_URL: ${BASE_URL}`);
+        console.log(`BASE_URL inicial: ${BASE_URL}`);
     });
 }
 
