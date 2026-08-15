@@ -4,7 +4,7 @@ const cheerio = require('cheerio');
 const cors = require('cors');
 
 const app = express();
-const PORT = process.env.PORT || 443;
+const PORT = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(express.json());
@@ -722,7 +722,7 @@ app.get('/v1/info', async (req, res) => {
         } else {
             const watchId = videoId || pageId;
             // Host atualizado do watch link
-            result.watch_link = `https://apijvflix-1-g6uk.onrender.com/v1/watch/${watchId}`;
+            result.watch_link = `https://apijvflix.wasmer.app/v1/watch${watchId}`;
         }
 
         res.json(result);
